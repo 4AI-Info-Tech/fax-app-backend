@@ -488,7 +488,9 @@ export class FaxDatabaseUtils {
 	}
 
 	/**
-	 * Update user's page usage after sending fax
+	 * Update user's page usage after fax is delivered (called from webhook handlers)
+	 * Note: This method is now only used when faxes are confirmed delivered via webhooks.
+	 * Usage is no longer recorded immediately upon fax submission to avoid counting failed faxes.
 	 * @param {string} userId - User ID
 	 * @param {number} pagesUsed - Number of pages used
 	 * @param {string} subscriptionId - Subscription ID to update

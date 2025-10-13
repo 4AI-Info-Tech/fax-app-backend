@@ -25,6 +25,12 @@
       "headers": {
         "Authorization": "Bearer phx_MCc1Hbtknc5DRloOj9PL9g0854XD7LHgYZkI9MPVHDcW3zN"
       }
-    }
+    },
+    "context7": {
+        "url": "https://mcp.context7.com/mcp",
+        "headers": {
+          "CONTEXT7_API_KEY": "ctx7sk-221b5f64-e2b3-4828-b9f8-e5baf0785292"
+        }
+      }
   }
 }

@@ -201,7 +201,52 @@ export default class extends WorkerEntrypoint {
 			// Check user credits before sending fax
 			const pagesRequired = faxRequest.pages || 1; // Default to 1 page if not specified
 			// Use caller environment for database operations (contains Supabase configuration)
-			const creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, pagesRequired, callerEnvObj, this.logger);
+			let creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, pagesRequired, callerEnvObj, this.logger);
+			
+			// If user has no active subscriptions, try to create a freemium subscription
+			if (!creditCheck.hasCredits && creditCheck.error === 'No active subscriptions found' && userId) {
+				this.logger.log('INFO', 'No active subscriptions found, attempting to create freemium subscription', {
+					userId: userId
+				});
+				
+				try {
+					// Call the database function to create freemium subscription
+					const { createClient } = await import('@supabase/supabase-js');
+					const supabase = createClient(callerEnvObj.SUPABASE_URL, callerEnvObj.SUPABASE_SERVICE_ROLE_KEY, {
+						auth: {
+							autoRefreshToken: false,
+							persistSession: false
+						}
+					});
+					
+					const { data: freemiumResult, error: freemiumError } = await supabase
+						.rpc('create_freemium_subscription_for_user', { user_uuid: userId });
+					
+					if (freemiumError) {
+						this.logger.log('ERROR', 'Failed to create freemium subscription', {
+							userId: userId,
+							error: freemiumError.message
+						});
+					} else if (freemiumResult && freemiumResult.length > 0 && freemiumResult[0].created) {
+						this.logger.log('INFO', 'Freemium subscription created successfully', {
+							userId: userId,
+							subscriptionId: freemiumResult[0].subscription_id
+						});
+						
+						// Re-check credits after creating freemium subscription
+						creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, pagesRequired, callerEnvObj, this.logger);
+					} else {
+						this.logger.log('INFO', 'Freemium subscription not created (user may already have subscriptions)', {
+							userId: userId
+						});
+					}
+				} catch (error) {
+					this.logger.log('ERROR', 'Error creating freemium subscription', {
+						userId: userId,
+						error: error.message
+					});
+				}
+			}
 			
 			if (!creditCheck.hasCredits) {
 				this.logger.log('WARN', 'Insufficient credits for fax', {
@@ -211,14 +256,33 @@ export default class extends WorkerEntrypoint {
 					error: creditCheck.error
 				});
 				
+				// Check if user has freemium subscription to provide specific messaging
+				const isFreemiumUser = creditCheck.subscriptions && 
+					creditCheck.subscriptions.some(sub => sub.product_id === 'freemium_monthly');
+				
+				let errorMessage = creditCheck.error || "You don't have enough credits to send this fax";
+				let errorTitle = "Insufficient credits";
+				
+				if (isFreemiumUser) {
+					if (pagesRequired > 5) {
+						errorTitle = "Page limit exceeded";
+						errorMessage = `Your free plan allows up to 5 pages per month. You're trying to send ${pagesRequired} pages. Please upgrade to a paid plan for higher limits.`;
+					} else {
+						errorTitle = "Monthly limit reached";
+						errorMessage = `You've used all 5 free pages for this month. Your limit will reset in 30 days from when you signed up, or upgrade to a paid plan for more pages.`;
+					}
+				}
+				
 				return {
 					statusCode: 402,
-					error: "Insufficient credits",
-					message: creditCheck.error || "You don't have enough credits to send this fax",
+					error: errorTitle,
+					message: errorMessage,
 					data: {
 						pagesRequired: pagesRequired,
 						availablePages: creditCheck.availablePages,
-						subscriptionId: creditCheck.subscriptionId
+						subscriptionId: creditCheck.subscriptionId,
+						isFreemiumUser: isFreemiumUser,
+						upgradeRequired: isFreemiumUser
 					},
 					timestamp: new Date().toISOString()
 				};
@@ -254,41 +318,13 @@ export default class extends WorkerEntrypoint {
 				apiProvider: faxProvider.getProviderName()
 			});
 
-			// Update user's page usage after successful fax submission
-			if (creditCheck.subscriptionId) {
-				try {
-					const usageUpdate = await FaxDatabaseUtils.updatePageUsage(
-						userId, 
-						pagesRequired, 
-						creditCheck.subscriptionId, 
-						callerEnvObj, 
-						this.logger
-					);
-					
-					if (usageUpdate.success) {
-						this.logger.log('INFO', 'Page usage updated successfully', {
-							userId: userId,
-							subscriptionId: creditCheck.subscriptionId,
-							pagesUsed: pagesRequired,
-							newPagesUsed: usageUpdate.updatedSubscription.pages_used
-						});
-					} else {
-						this.logger.log('ERROR', 'Failed to update page usage', {
-							userId: userId,
-							subscriptionId: creditCheck.subscriptionId,
-							error: usageUpdate.error
-						});
-						// Don't fail the fax operation if usage tracking fails
-					}
-				} catch (usageError) {
-					this.logger.log('ERROR', 'Error updating page usage', {
-						userId: userId,
-						subscriptionId: creditCheck.subscriptionId,
-						error: usageError.message
-					});
-					// Don't fail the fax operation if usage tracking fails
-				}
-			}
+			// Note: Page usage is NOT updated here - it will be updated when the fax is actually delivered
+			// via webhook handlers. This ensures failed faxes don't count against user's quota.
+			this.logger.log('INFO', 'Fax submitted - usage will be recorded when delivered via webhook', {
+				userId: userId,
+				subscriptionId: creditCheck.subscriptionId,
+				pagesRequired: pagesRequired
+			});
 
 			return {
 				statusCode: 200,
@@ -607,6 +643,7 @@ export default class extends WorkerEntrypoint {
 			if (standardizedStatus === 'delivered' && updatedFaxRecord && updatedFaxRecord.user_id) {
 				const finalPageCount = pageCount || updatedFaxRecord.pages || 1;
 				
+				// Record usage in analytics table
 				await DatabaseUtils.recordUsage({
 					userId: updatedFaxRecord.user_id,
 					type: 'fax',
@@ -620,6 +657,62 @@ export default class extends WorkerEntrypoint {
 						status: standardizedStatus
 					}
 				}, callerEnvObj, this.logger);
+				
+				// Update subscription's pages_used field
+				try {
+					// Find the user's active subscription to update
+					const { createClient } = await import('@supabase/supabase-js');
+					const supabase = createClient(callerEnvObj.SUPABASE_URL, callerEnvObj.SUPABASE_SERVICE_ROLE_KEY, {
+						auth: {
+							autoRefreshToken: false,
+							persistSession: false
+						}
+					});
+					
+					// Get user's active subscriptions
+					const { data: subscriptions, error: subError } = await supabase
+						.from('user_subscriptions')
+						.select('id, pages_used')
+						.eq('user_id', updatedFaxRecord.user_id)
+						.eq('is_active', true)
+						.gt('expires_at', new Date().toISOString())
+						.order('created_at', { ascending: false });
+					
+					if (!subError && subscriptions && subscriptions.length > 0) {
+						// Update the first (most recent) active subscription
+						const subscription = subscriptions[0];
+						const newPagesUsed = (subscription.pages_used || 0) + finalPageCount;
+						
+						const { error: updateError } = await supabase
+							.from('user_subscriptions')
+							.update({ 
+								pages_used: newPagesUsed,
+								updated_at: new Date().toISOString()
+							})
+							.eq('id', subscription.id);
+						
+						if (updateError) {
+							this.logger.log('ERROR', 'Failed to update subscription pages_used in webhook', {
+								userId: updatedFaxRecord.user_id,
+								subscriptionId: subscription.id,
+								pagesUsed: finalPageCount,
+								error: updateError.message
+							});
+						} else {
+							this.logger.log('INFO', 'Updated subscription pages_used in webhook', {
+								userId: updatedFaxRecord.user_id,
+								subscriptionId: subscription.id,
+								pagesUsed: finalPageCount,
+								newPagesUsed: newPagesUsed
+							});
+						}
+					}
+				} catch (error) {
+					this.logger.log('ERROR', 'Error updating subscription pages_used in webhook', {
+						userId: updatedFaxRecord.user_id,
+						error: error.message
+					});
+				}
 			}
 
 			this.logger.log('INFO', 'Telnyx webhook processed successfully', { 
@@ -724,6 +817,7 @@ export default class extends WorkerEntrypoint {
 			if (standardizedStatus === 'delivered' && updatedFaxRecord && updatedFaxRecord.user_id) {
 				const finalPageCount = pageCount || updatedFaxRecord.pages || 1;
 				
+				// Record usage in analytics table
 				await DatabaseUtils.recordUsage({
 					userId: updatedFaxRecord.user_id,
 					type: 'fax',
@@ -737,6 +831,62 @@ export default class extends WorkerEntrypoint {
 						status: standardizedStatus
 					}
 				}, callerEnvObj, this.logger);
+				
+				// Update subscription's pages_used field
+				try {
+					// Find the user's active subscription to update
+					const { createClient } = await import('@supabase/supabase-js');
+					const supabase = createClient(callerEnvObj.SUPABASE_URL, callerEnvObj.SUPABASE_SERVICE_ROLE_KEY, {
+						auth: {
+							autoRefreshToken: false,
+							persistSession: false
+						}
+					});
+					
+					// Get user's active subscriptions
+					const { data: subscriptions, error: subError } = await supabase
+						.from('user_subscriptions')
+						.select('id, pages_used')
+						.eq('user_id', updatedFaxRecord.user_id)
+						.eq('is_active', true)
+						.gt('expires_at', new Date().toISOString())
+						.order('created_at', { ascending: false });
+					
+					if (!subError && subscriptions && subscriptions.length > 0) {
+						// Update the first (most recent) active subscription
+						const subscription = subscriptions[0];
+						const newPagesUsed = (subscription.pages_used || 0) + finalPageCount;
+						
+						const { error: updateError } = await supabase
+							.from('user_subscriptions')
+							.update({ 
+								pages_used: newPagesUsed,
+								updated_at: new Date().toISOString()
+							})
+							.eq('id', subscription.id);
+						
+						if (updateError) {
+							this.logger.log('ERROR', 'Failed to update subscription pages_used in webhook', {
+								userId: updatedFaxRecord.user_id,
+								subscriptionId: subscription.id,
+								pagesUsed: finalPageCount,
+								error: updateError.message
+							});
+						} else {
+							this.logger.log('INFO', 'Updated subscription pages_used in webhook', {
+								userId: updatedFaxRecord.user_id,
+								subscriptionId: subscription.id,
+								pagesUsed: finalPageCount,
+								newPagesUsed: newPagesUsed
+							});
+						}
+					}
+				} catch (error) {
+					this.logger.log('ERROR', 'Error updating subscription pages_used in webhook', {
+						userId: updatedFaxRecord.user_id,
+						error: error.message
+					});
+				}
 			}
 
 			this.logger.log('INFO', 'Notifyre webhook processed successfully', { 
