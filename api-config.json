@@ -22,6 +22,10 @@
         {
             "alias": "revenuecat_service",
             "binding": "REVENUECAT_SERVICE"
+        },
+        {
+            "alias": "management_service",
+            "binding": "MANAGEMENT_SERVICE"
         }
     ],
     "cors": {
@@ -134,6 +138,16 @@
                 "type": "service_binding",
                 "binding": "revenuecat_service",
                 "function": "health"
+            },
+            "auth": true
+        },
+        {
+            "method": "GET",
+            "path": "/v1/usage/summary",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "usageSummary"
             },
             "auth": true
         }

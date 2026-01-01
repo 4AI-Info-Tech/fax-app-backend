@@ -191,6 +191,118 @@ export class DatabaseUtils {
 	}
 
 	/**
+	 * Get usage summary for a user
+	 * @param {string} userId - User ID
+	 * @param {Object} options - Query options (period: 'daily', 'weekly', 'monthly', 'all_time')
+	 * @param {Object} env - Environment variables
+	 * @param {Logger} logger - Logger instance
+	 * @returns {Object} Usage summary statistics
+	 * _Requirements: 13.1, 13.2, 13.3_
+	 */
+	static async getUserUsageSummary(userId, options = {}, env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot get usage summary');
+				return null;
+			}
+
+			const supabase = this.getSupabaseAdminClient(env);
+			const period = options.period || 'all_time';
+
+			// Calculate start date based on period
+			let startDate = null;
+			const now = new Date();
+			
+			switch (period) {
+				case 'daily':
+					startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+					break;
+				case 'weekly':
+					const dayOfWeek = now.getDay();
+					startDate = new Date(now);
+					startDate.setDate(now.getDate() - dayOfWeek);
+					startDate.setHours(0, 0, 0, 0);
+					break;
+				case 'monthly':
+					startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+					break;
+				case 'all_time':
+				default:
+					startDate = null;
+					break;
+			}
+
+			// Build query for faxes
+			let query = supabase
+				.from('faxes')
+				.select('id, pages, status, created_at')
+				.eq('user_id', userId)
+				.order('created_at', { ascending: false });
+
+			if (startDate) {
+				query = query.gte('created_at', startDate.toISOString());
+			}
+
+			const { data: faxes, error: faxesError } = await query;
+
+			if (faxesError) {
+				logger.log('ERROR', 'Failed to get user faxes for usage summary', {
+					error: faxesError.message,
+					userId
+				});
+				return {
+					error: faxesError.message,
+					totalFaxesSent: 0,
+					totalPagesUsed: 0,
+					successfulFaxes: 0,
+					failedFaxes: 0,
+					successRate: 0,
+					period,
+					periodStartDate: startDate ? startDate.toISOString() : null,
+					periodEndDate: now.toISOString()
+				};
+			}
+
+			// Calculate statistics
+			const totalFaxesSent = faxes.length;
+			const totalPagesUsed = faxes.reduce((sum, fax) => sum + (fax.pages || 0), 0);
+			const successfulFaxes = faxes.filter(fax => fax.status === 'delivered').length;
+			const failedFaxes = faxes.filter(fax => fax.status === 'failed').length;
+			const successRate = totalFaxesSent > 0 
+				? (successfulFaxes / totalFaxesSent) * 100 
+				: 0;
+
+			const summary = {
+				totalFaxesSent,
+				totalPagesUsed,
+				successfulFaxes,
+				failedFaxes,
+				successRate: Math.round(successRate * 100) / 100, // Round to 2 decimal places
+				period,
+				periodStartDate: startDate ? startDate.toISOString() : null,
+				periodEndDate: now.toISOString()
+			};
+
+			logger.log('INFO', 'Usage summary retrieved successfully', {
+				userId,
+				period,
+				totalFaxesSent,
+				totalPagesUsed,
+				successRate: summary.successRate
+			});
+
+			return summary;
+
+		} catch (error) {
+			logger.log('ERROR', 'Error getting usage summary', {
+				error: error.message,
+				userId
+			});
+			return null;
+		}
+	}
+
+	/**
 	 * Get recent activity
 	 * @param {Object} options - Query options
 	 * @param {Object} env - Environment variables

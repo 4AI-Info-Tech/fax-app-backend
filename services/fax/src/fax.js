@@ -8,6 +8,7 @@ import { DatabaseUtils, FaxDatabaseUtils } from './database.js';
 import { NotifyreProvider } from './providers/notifyre-provider.js';
 import { TelnyxProvider } from './providers/telnyx-provider.js';
 import { R2Utils } from './r2-utils.js';
+import { NotificationService } from './notifications.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -15,6 +16,7 @@ export default class extends WorkerEntrypoint {
 		this.logger = null;
 		this.env = env;
 		this.initializeLogger(env);
+		this.notificationService = null;
 	}
 
 	async fetch(request, env) {
@@ -26,6 +28,63 @@ export default class extends WorkerEntrypoint {
 	initializeLogger(env) {
 		if (!this.logger) {
 			this.logger = new Logger(env);
+		}
+		// Initialize notification service after logger is available
+		if (!this.notificationService && this.logger) {
+			this.notificationService = new NotificationService(this.logger);
+		}
+	}
+
+	/**
+	 * Send push notification for fax status change
+	 * Handles notification sending gracefully - failures don't affect webhook processing
+	 * @param {Object} fax - Fax record with status information
+	 * @param {Object} callerEnvObj - Environment variables
+	 * @returns {Promise<void>}
+	 */
+	async sendFaxStatusPushNotification(fax, callerEnvObj) {
+		try {
+			// Only send notifications for terminal statuses (delivered or failed)
+			const terminalStatuses = ['delivered', 'failed'];
+			if (!terminalStatuses.includes(fax.status)) {
+				this.logger.log('DEBUG', 'Skipping notification for non-terminal status', {
+					faxId: fax.id,
+					status: fax.status
+				});
+				return;
+			}
+
+			// Ensure notification service is initialized
+			if (!this.notificationService) {
+				this.notificationService = new NotificationService(this.logger);
+			}
+
+			// Send the notification
+			const result = await this.notificationService.sendFaxStatusNotification(callerEnvObj, fax);
+
+			if (result.success) {
+				this.logger.log('INFO', 'Push notification sent for fax status change', {
+					faxId: fax.id,
+					status: fax.status,
+					userId: fax.user_id
+				});
+			} else if (result.skipped) {
+				this.logger.log('DEBUG', 'Push notification skipped', {
+					faxId: fax.id,
+					reason: result.reason
+				});
+			} else {
+				this.logger.log('WARN', 'Failed to send push notification', {
+					faxId: fax.id,
+					error: result.error
+				});
+			}
+		} catch (error) {
+			// Log error but don't throw - notification failures shouldn't break webhook processing
+			this.logger.log('ERROR', 'Error sending push notification', {
+				faxId: fax?.id,
+				error: error.message
+			});
 		}
 	}
 
@@ -715,6 +774,17 @@ export default class extends WorkerEntrypoint {
 				}
 			}
 
+			// Send push notification for terminal statuses (delivered or failed)
+			if (updatedFaxRecord && updatedFaxRecord.user_id && ['delivered', 'failed'].includes(standardizedStatus)) {
+				await this.sendFaxStatusPushNotification({
+					id: updatedFaxRecord.id,
+					user_id: updatedFaxRecord.user_id,
+					status: standardizedStatus,
+					recipients: updatedFaxRecord.recipients || [],
+					error_message: updateData.error_message
+				}, callerEnvObj);
+			}
+
 			this.logger.log('INFO', 'Telnyx webhook processed successfully', { 
 				telnyxFaxId, 
 				eventType,
@@ -887,6 +957,17 @@ export default class extends WorkerEntrypoint {
 						error: error.message
 					});
 				}
+			}
+
+			// Send push notification for terminal statuses (delivered or failed)
+			if (updatedFaxRecord && updatedFaxRecord.user_id && ['delivered', 'failed'].includes(standardizedStatus)) {
+				await this.sendFaxStatusPushNotification({
+					id: updatedFaxRecord.id,
+					user_id: updatedFaxRecord.user_id,
+					status: standardizedStatus,
+					recipients: updatedFaxRecord.recipients || [],
+					error_message: null // Notifyre doesn't provide error message in the same way
+				}, callerEnvObj);
 			}
 
 			this.logger.log('INFO', 'Notifyre webhook processed successfully', { 

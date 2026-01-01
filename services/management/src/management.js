@@ -316,4 +316,134 @@ export default class extends WorkerEntrypoint {
 			});
 		}
 	}
+
+	/**
+	 * Get usage summary for the authenticated user
+	 * GET /v1/usage/summary?period=daily|weekly|monthly|all_time
+	 * _Requirements: 13.1, 13.2, 13.3_
+	 */
+	async usageSummary(request, caller_env = "{}", sagContext = "{}") {
+		this.logger.log('INFO', 'Usage summary requested');
+		
+		try {
+			// Parse caller environment
+			const callerEnvObj = JSON.parse(caller_env || '{}');
+			
+			// Check if user is authenticated
+			if (!callerEnvObj.userId) {
+				return new Response(JSON.stringify({
+					statusCode: 401,
+					error: 'Unauthorized',
+					message: 'Authentication required'
+				}), {
+					status: 401,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*',
+						'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+					}
+				});
+			}
+
+			// Parse query parameters from URL
+			const url = new URL(request.url);
+			const period = url.searchParams.get('period') || 'all_time';
+
+			// Validate period parameter
+			const validPeriods = ['daily', 'weekly', 'monthly', 'all_time'];
+			if (!validPeriods.includes(period)) {
+				return new Response(JSON.stringify({
+					statusCode: 400,
+					error: 'Bad Request',
+					message: `Invalid period. Must be one of: ${validPeriods.join(', ')}`
+				}), {
+					status: 400,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*',
+						'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+					}
+				});
+			}
+
+			// Get usage summary from database
+			const summary = await DatabaseUtils.getUserUsageSummary(
+				callerEnvObj.userId,
+				{ period },
+				this.env,
+				this.logger
+			);
+
+			if (!summary) {
+				return new Response(JSON.stringify({
+					statusCode: 500,
+					error: 'Internal Server Error',
+					message: 'Failed to retrieve usage summary'
+				}), {
+					status: 500,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*',
+						'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+					}
+				});
+			}
+
+			if (summary.error) {
+				return new Response(JSON.stringify({
+					statusCode: 500,
+					error: 'Internal Server Error',
+					message: summary.error,
+					data: summary
+				}), {
+					status: 500,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*',
+						'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+						'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+					}
+				});
+			}
+
+			this.logger.log('INFO', 'Usage summary retrieved successfully', {
+				userId: callerEnvObj.userId,
+				period,
+				totalFaxesSent: summary.totalFaxesSent
+			});
+
+			return new Response(JSON.stringify({
+				statusCode: 200,
+				message: 'Usage summary retrieved successfully',
+				data: summary
+			}), {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*',
+					'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+					'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+				}
+			});
+		} catch (error) {
+			this.logger.log('ERROR', `Usage summary retrieval failed: ${error.message}`);
+			return new Response(JSON.stringify({
+				statusCode: 500,
+				error: 'Internal Server Error',
+				message: error.message,
+				service: 'management'
+			}), {
+				status: 500,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*',
+					'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+					'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+				}
+			});
+		}
+	}
 } 
