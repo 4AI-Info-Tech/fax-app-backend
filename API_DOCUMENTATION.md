@@ -8,6 +8,23 @@ This API provides comprehensive fax functionality with support for multiple prov
 
 The API supports sending faxes, checking status, retrieving sent and received faxes, downloading fax documents, managing fax numbers, and handling webhooks.
 
+## Quick Endpoint Reference
+
+| Endpoint | Method | Auth Required | Description |
+|----------|--------|---------------|-------------|
+| `/v1/fax/send` | POST | Yes | Send a fax |
+| `/v1/fax/status` | GET | Yes | Get fax status |
+| `/v1/fax/sent` | GET | Yes | List sent faxes |
+| `/v1/fax/received` | GET | Yes | List received faxes |
+| `/v1/fax/sent/download` | GET | Yes | Download sent fax |
+| `/v1/fax/received/download` | GET | Yes | Download received fax |
+| `/v1/fax/numbers` | GET | Yes | List fax numbers |
+| `/v1/fax/coverpages` | GET | Yes | List cover pages |
+| `/v1/fax/webhook/notifyre` | POST | No | Notifyre webhook handler |
+| `/v1/fax/health` | GET | No | Health check |
+| `/v1/fax/health/protected` | GET | Yes | Protected health check |
+| `/v1/fax/webhook/user-created` | POST | No | User creation webhook |
+
 ## Base URL
 - **Staging**: `https://api-staging.sendfax.pro`
 - **Production**: `https://api.sendfax.pro`
@@ -542,14 +559,143 @@ curl -X POST "https://api.sendfax.pro/v1/fax/send" \
     }]
   }'
 
+# Get fax status
+curl -X GET "https://api.sendfax.pro/v1/fax/status?id=fax_123456" \
+  -H "Authorization: Bearer your-jwt-token"
+
 # List sent faxes
 curl -X GET "https://api.sendfax.pro/v1/fax/sent?limit=10" \
   -H "Authorization: Bearer your-jwt-token"
 
-# Download a fax
+# List received faxes
+curl -X GET "https://api.sendfax.pro/v1/fax/received?limit=10" \
+  -H "Authorization: Bearer your-jwt-token"
+
+# Download sent fax
 curl -X GET "https://api.sendfax.pro/v1/fax/sent/download?id=fax_123456" \
+  -H "Authorization: Bearer your-jwt-token" \
+  -o downloaded_fax.pdf
+
+# Download received fax
+curl -X GET "https://api.sendfax.pro/v1/fax/received/download?id=received_fax_123456" \
+  -H "Authorization: Bearer your-jwt-token" \
+  -o downloaded_received_fax.pdf
+
+# List fax numbers
+curl -X GET "https://api.sendfax.pro/v1/fax/numbers" \
+  -H "Authorization: Bearer your-jwt-token"
+
+# List cover pages
+curl -X GET "https://api.sendfax.pro/v1/fax/coverpages" \
+  -H "Authorization: Bearer your-jwt-token"
+
+# Health check (no auth)
+curl -X GET "https://api.sendfax.pro/v1/fax/health"
+
+# Protected health check
+curl -X GET "https://api.sendfax.pro/v1/fax/health/protected" \
   -H "Authorization: Bearer your-jwt-token"
 ```
+
+---
+
+## Mobile App Integration Guide
+
+This section provides tips and best practices for integrating the Fax API into mobile applications (iOS, Android, etc.).
+
+### Authentication Handling
+- **JWT Tokens**: Store JWT tokens securely using platform-specific secure storage (e.g., Keychain on iOS, KeyStore on Android).
+- **Token Refresh**: Implement automatic token refresh logic if your backend supports refresh tokens. Handle 401 errors by prompting re-authentication.
+- **Header Inclusion**: Always include the `Authorization: Bearer <token>` header in authenticated requests.
+
+### Request Examples for Mobile Apps
+
+#### Swift (iOS)
+```swift
+import Foundation
+
+func sendFax(token: String, recipient: String, fileData: Data) async throws -> Data {
+    let url = URL(string: "https://api.sendfax.pro/v1/fax/send")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    
+    let body: [String: Any] = [
+        "recipient": recipient,
+        "files": [
+            [
+                "data": fileData.base64EncodedString(),
+                "filename": "document.pdf",
+                "mimeType": "application/pdf"
+            ]
+        ]
+    ]
+    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+        throw URLError(.badServerResponse)
+    }
+    return data
+}
+```
+
+#### Kotlin (Android)
+```kotlin
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
+
+fun sendFax(token: String, recipient: String, fileData: ByteArray, callback: Callback) {
+    val client = OkHttpClient()
+    val mediaType = "application/json; charset=utf-8".toMediaType()
+    
+    val json = """
+    {
+        "recipient": "$recipient",
+        "files": [
+            {
+                "data": "${fileData.toBase64()}",
+                "filename": "document.pdf",
+                "mimeType": "application/pdf"
+            }
+        ]
+    }
+    """.trimIndent()
+    
+    val body = json.toRequestBody(mediaType)
+    val request = Request.Builder()
+        .url("https://api.sendfax.pro/v1/fax/send")
+        .post(body)
+        .addHeader("Authorization", "Bearer $token")
+        .build()
+    
+    client.newCall(request).enqueue(callback)
+}
+
+// Extension for Base64 encoding
+fun ByteArray.toBase64(): String = android.util.Base64.encodeToString(this, android.util.Base64.NO_WRAP)
+```
+
+### Error Handling
+- **Network Errors**: Implement retry logic with exponential backoff for transient failures.
+- **API Errors**: Parse error responses (status codes 400-500) and display user-friendly messages.
+- **Rate Limiting**: Handle 429 responses by implementing rate limiting on the client side or showing a "try again later" message.
+- **File Upload Limits**: Check file sizes before upload (max 100MB) and provide feedback for oversized files.
+
+### Best Practices
+- **Background Uploads**: Use background sessions for large file uploads to prevent app suspension.
+- **Progress Indicators**: Show upload/download progress for better user experience.
+- **Offline Handling**: Queue requests when offline and retry when connectivity is restored.
+- **Security**: Never log or store sensitive data like tokens in plain text.
+- **Testing**: Use staging environment for development and testing.
+
+### Common Integration Patterns
+- **Polling for Status**: After sending a fax, poll the status endpoint every 10-30 seconds until completion.
+- **Webhook Alternatives**: For real-time updates, consider using push notifications or WebSockets if webhooks are not feasible.
+- **Caching**: Cache fax lists locally to reduce API calls and improve performance.
 
 ---
 
