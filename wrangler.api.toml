@@ -24,7 +24,8 @@ services = [
   { binding = "FAX_SERVICE", service = "fax-service-staging" },
   { binding = "ENV_TEST_SERVICE", service = "env-test-service-staging" },
   { binding = "REVENUECAT_SERVICE", service = "revenuecat-service-staging" },
-  { binding = "MANAGEMENT_SERVICE", service = "management-service-staging" }
+  { binding = "MANAGEMENT_SERVICE", service = "management-service-staging" },
+  { binding = "ADMOB_SERVICE", service = "admob-service-staging" }
 ]
 
 [env.staging.vars]
@@ -34,6 +35,7 @@ LOG_LEVEL = "DEBUG"
 FAX_PROVIDER = "telynx"
 TELNYX_CONNECTION_ID = "2740858224415605884"
 TELNYX_SENDER_ID = "+18334610414"
+ADMOB_SKIP_VERIFICATION = "true"
 
 [env.staging.observability]
 enabled = true
@@ -52,7 +54,8 @@ services = [
   { binding = "FAX_SERVICE", service = "fax-service-prod" },
   { binding = "ENV_TEST_SERVICE", service = "env-test-service-prod" },
   { binding = "REVENUECAT_SERVICE", service = "revenuecat-service-prod" },
-  { binding = "MANAGEMENT_SERVICE", service = "management-service-prod" }
+  { binding = "MANAGEMENT_SERVICE", service = "management-service-prod" },
+  { binding = "ADMOB_SERVICE", service = "admob-service-prod" }
 ]
 
 [env.prod.vars]

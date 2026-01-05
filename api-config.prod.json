@@ -30,6 +30,10 @@
         {
             "alias": "management_service",
             "binding": "MANAGEMENT_SERVICE"
+        },
+        {
+            "alias": "admob_service",
+            "binding": "ADMOB_SERVICE"
         }
     ],
     "cors": {
@@ -232,6 +236,26 @@
                 "type": "service_binding",
                 "binding": "management_service",
                 "function": "signInWithAppleWebhook"
+            },
+            "auth": false
+        },
+        {
+            "method": "GET",
+            "path": "/v1/admob/ssv",
+            "integration": {
+                "type": "service_binding",
+                "binding": "admob_service",
+                "function": "ssvCallback"
+            },
+            "auth": false
+        },
+        {
+            "method": "GET",
+            "path": "/v1/admob/health",
+            "integration": {
+                "type": "service_binding",
+                "binding": "admob_service",
+                "function": "health"
             },
             "auth": false
         }

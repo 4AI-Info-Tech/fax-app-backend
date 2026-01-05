@@ -1,0 +1,32 @@
+name = "admob-service"
+main = "src/admob.js"
+compatibility_date = "2025-07-04"
+compatibility_flags = ["nodejs_compat"]
+send_metrics = true
+minify = false
+workers_dev = false
+
+[observability]
+enabled = true
+
+[env.staging]
+name = "admob-service-staging"
+
+[env.staging.observability]
+enabled = true
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+LOG_LEVEL = "DEBUG"
+
+[env.prod]
+name = "admob-service-prod" 
+minify = true
+
+[env.prod.observability]
+enabled = true
+head_sampling_rate = 1
+
+[env.prod.vars]
+ENVIRONMENT = "prod"
+LOG_LEVEL = "INFO"
