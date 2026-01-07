@@ -6,6 +6,20 @@ import { createClient } from '@supabase/supabase-js';
 
 export class DatabaseUtils {
 
+	/**
+	 * Validate if a string is a valid UUID format
+	 * @param {string} str - The string to validate
+	 * @returns {boolean} - Whether the string is a valid UUID
+	 */
+	static isValidUUID(str) {
+		if (!str || typeof str !== 'string') {
+			return false;
+		}
+		// UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (accepts all UUID versions)
+		const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+		return uuidRegex.test(str);
+	}
+
 	static getSupabaseAdminClient(env) {
 		if (!env.SUPABASE_SERVICE_ROLE_KEY) {
 			throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for backend operations');
@@ -56,7 +70,18 @@ export class DatabaseUtils {
 			}
 
 			// Use original_app_user_id as the user_id for foreign key connection to auth.users
+			// Validate that it's a valid UUID format (RevenueCat anonymous IDs like $RCAnonymousID:... are not valid UUIDs)
 			let userId = event.original_app_user_id;
+			
+			// Validate UUID format - PostgreSQL requires valid UUID format for UUID columns
+			if (userId && !DatabaseUtils.isValidUUID(userId)) {
+				logger.log('WARN', 'original_app_user_id is not a valid UUID, setting user_id to null', {
+					original_app_user_id: userId,
+					eventType: event.type,
+					eventId: event.id
+				});
+				userId = null;
+			}
 
 			// Handle entitlement_id - check both single value and array
 			let entitlementId = null;

@@ -109,7 +109,6 @@ dist
 
 # Wrangler
 .wrangler/
-wrangler.toml
 
 # Cloudflare Workers
 dist/ 
