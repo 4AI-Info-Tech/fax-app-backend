@@ -28,7 +28,6 @@ FAX_FILES_BUCKET_PUBLIC_URL = "https://r2-staging.sendfax.pro"
 TELNYX_CONNECTION_ID = "2740858224415605884"
 TELNYX_SENDER_ID = "+18334610414"
 ONESIGNAL_APP_ID = "aa96539a-1aec-4801-b4b0-81cca3510d48"
-ONESIGNAL_REST_API_KEY = "os_v2_app_vklfhgq25readnfqqhgkguinjbzzh2oigi4euafna2ic6vwk4aqaeifr52ieagjt344r3vaytddsxgsflbabvqdxdudijbcjzpkmoaq"
 
 [[env.staging.r2_buckets]]
 binding = "FAX_FILES_BUCKET"
