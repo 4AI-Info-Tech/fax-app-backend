@@ -408,8 +408,8 @@ export class FaxDatabaseUtils {
 				.select(`
 					id,
 					product_id,
-					page_limit,
-					pages_used,
+					credit_limit,
+					credits_used,
 					expires_at,
 					is_active
 				`)
@@ -445,9 +445,9 @@ export class FaxDatabaseUtils {
 			let primarySubscription = null;
 
 			for (const subscription of subscriptions) {
-				const availablePages = subscription.page_limit - subscription.pages_used;
-				if (availablePages > 0) {
-					totalAvailablePages += availablePages;
+				const availableCredits = subscription.credit_limit - subscription.credits_used;
+				if (availableCredits > 0) {
+					totalAvailablePages += availableCredits;
 					if (!primarySubscription) {
 						primarySubscription = subscription;
 					}
@@ -488,24 +488,24 @@ export class FaxDatabaseUtils {
 	}
 
 	/**
-	 * Update user's page usage after fax is delivered (called from webhook handlers)
+	 * Update user's credit usage after fax is delivered (called from webhook handlers)
 	 * Note: This method is now only used when faxes are confirmed delivered via webhooks.
 	 * Usage is no longer recorded immediately upon fax submission to avoid counting failed faxes.
 	 * @param {string} userId - User ID
-	 * @param {number} pagesUsed - Number of pages used
+	 * @param {number} creditsUsed - Number of credits used
 	 * @param {string} subscriptionId - Subscription ID to update
 	 * @param {Object} env - Environment variables
 	 * @param {Object} logger - Logger instance
 	 * @returns {Promise<Object>} Update result
 	 */
-	static async updatePageUsage(userId, pagesUsed, subscriptionId, env, logger) {
+	static async updatePageUsage(userId, creditsUsed, subscriptionId, env, logger) {
 		try {
 			const supabase = this.getSupabaseAdminClient(env);
 
-			// First get the current subscription to calculate new pages_used
+			// First get the current subscription to calculate new credits_used
 			const { data: currentSubscription, error: fetchError } = await supabase
 				.from('user_subscriptions')
-				.select('pages_used')
+				.select('credits_used')
 				.eq('id', subscriptionId)
 				.eq('user_id', userId)
 				.single();
@@ -522,13 +522,13 @@ export class FaxDatabaseUtils {
 				};
 			}
 
-			const newPagesUsed = (currentSubscription.pages_used || 0) + pagesUsed;
+			const newCreditsUsed = (currentSubscription.credits_used || 0) + creditsUsed;
 
-			// Update the primary subscription's pages_used
+			// Update the primary subscription's credits_used
 			const { data: updatedSubscription, error: updateError } = await supabase
 				.from('user_subscriptions')
 				.update({ 
-					pages_used: newPagesUsed,
+					credits_used: newCreditsUsed,
 					updated_at: new Date().toISOString()
 				})
 				.eq('id', subscriptionId)
@@ -537,11 +537,11 @@ export class FaxDatabaseUtils {
 				.single();
 
 			if (updateError) {
-				logger.log('ERROR', 'Failed to update page usage', {
+				logger.log('ERROR', 'Failed to update credit usage', {
 					error: updateError.message,
 					userId: userId,
 					subscriptionId: subscriptionId,
-					pagesUsed: pagesUsed
+					creditsUsed: creditsUsed
 				});
 				return {
 					success: false,
@@ -556,7 +556,7 @@ export class FaxDatabaseUtils {
 					user_id: userId,
 					type: 'fax',
 					unit_type: 'page',
-					usage_amount: pagesUsed,
+					usage_amount: creditsUsed,
 					metadata: {
 						subscription_id: subscriptionId,
 						action: 'fax_sent'
@@ -567,16 +567,16 @@ export class FaxDatabaseUtils {
 				logger.log('WARN', 'Failed to record usage analytics', {
 					error: usageError.message,
 					userId: userId,
-					pagesUsed: pagesUsed
+					creditsUsed: creditsUsed
 				});
 				// Don't fail the operation if analytics recording fails
 			}
 
-			logger.log('INFO', 'Page usage updated successfully', {
+			logger.log('INFO', 'Credit usage updated successfully', {
 				userId: userId,
 				subscriptionId: subscriptionId,
-				pagesUsed: pagesUsed,
-				newPagesUsed: updatedSubscription.pages_used
+				creditsUsed: creditsUsed,
+				newCreditsUsed: updatedSubscription.credits_used
 			});
 
 			return {
@@ -585,11 +585,11 @@ export class FaxDatabaseUtils {
 			};
 
 		} catch (error) {
-			logger.log('ERROR', 'Error updating page usage', {
+			logger.log('ERROR', 'Error updating credit usage', {
 				error: error.message,
 				userId: userId,
 				subscriptionId: subscriptionId,
-				pagesUsed: pagesUsed
+				creditsUsed: creditsUsed
 			});
 			return {
 				success: false,

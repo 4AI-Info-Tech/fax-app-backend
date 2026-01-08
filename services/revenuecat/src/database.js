@@ -212,11 +212,11 @@ export class DatabaseUtils {
 						// Handle consumables (non-renewing purchases) differently
 						if (event.type === 'NON_RENEWING_PURCHASE' && product.type === 'limited-usage') {
 							// For consumables, add pages to existing subscription or create new one
-							await DatabaseUtils.addConsumablePages(userId, event.product_id, product.page_limit || 0, env, logger);
-							logger.log('INFO', 'Consumable pages added from webhook', {
+							await DatabaseUtils.addConsumablePages(userId, event.product_id, product.credit_limit || 0, env, logger);
+							logger.log('INFO', 'Consumable credits added from webhook', {
 								userId: userId,
 								productId: event.product_id,
-								pagesAdded: product.page_limit || 0
+								creditsAdded: product.credit_limit || 0
 							});
 						} else {
 							// For subscriptions, create/update subscription
@@ -227,7 +227,7 @@ export class DatabaseUtils {
 								entitlementId: entitlementId,
 								purchasedAt: event.purchased_at_ms ? new Date(parseInt(event.purchased_at_ms)).toISOString() : new Date().toISOString(),
 								expiresAt: expiresAt,
-								pageLimit: product.page_limit || 0
+								creditLimit: product.credit_limit || 0
 							};
 
 							const userSubscription = await DatabaseUtils.createOrUpdateUserSubscription(subscriptionData, env, logger);
@@ -357,7 +357,7 @@ export class DatabaseUtils {
 						product_id,
 						display_name,
 						description,
-						page_limit,
+						credit_limit,
 						expire_days,
 						expire_period,
 						type
@@ -519,7 +519,7 @@ export class DatabaseUtils {
 				entitlementId,
 				purchasedAt,
 				expiresAt,
-				pageLimit
+				creditLimit
 			} = subscriptionData;
 
 			// Validate required fields
@@ -574,8 +574,8 @@ export class DatabaseUtils {
 						entitlement_id: entitlementId,
 						purchased_at: purchasedAt,
 						expires_at: expiresAt,
-						page_limit: pageLimit || 0,
-						pages_used: 0, // Reset pages used for new subscription
+					credit_limit: creditLimit || 0,
+					credits_used: 0, // Reset credits used for new subscription
 						updated_at: new Date().toISOString()
 					};
 
@@ -613,8 +613,8 @@ export class DatabaseUtils {
 				entitlement_id: entitlementId,
 				purchased_at: purchasedAt,
 				expires_at: expiresAt,
-				page_limit: pageLimit || 0,
-				pages_used: 0,
+				credit_limit: creditLimit || 0,
+				credits_used: 0,
 				is_active: true
 			};
 
@@ -676,7 +676,7 @@ export class DatabaseUtils {
 						product_id,
 						display_name,
 						description,
-						page_limit,
+						credit_limit,
 						expire_days,
 						expire_period,
 						type
@@ -778,7 +778,7 @@ export class DatabaseUtils {
 
 			const { data: updatedSubscription, error } = await supabase
 				.from('user_subscriptions')
-				.update({ pages_used: pagesUsed })
+				.update({ credits_used: creditsUsed })
 				.eq('id', subscriptionId)
 				.select()
 				.single();
@@ -1156,18 +1156,18 @@ export class DatabaseUtils {
 	}
 
 	/**
-	 * Add consumable pages to user's subscription or create new one
+	 * Add consumable credits to user's subscription or create new one
 	 * @param {string} userId - The user ID
 	 * @param {string} productId - The consumable product ID
-	 * @param {number} pagesToAdd - Number of pages to add
+	 * @param {number} creditsToAdd - Number of credits to add
 	 * @param {Object} env - Environment variables
 	 * @param {Object} logger - Logger instance
 	 * @returns {Promise<Object|null>} - The updated/created subscription or null if failed
 	 */
-	static async addConsumablePages(userId, productId, pagesToAdd, env, logger) {
+	static async addConsumablePages(userId, productId, creditsToAdd, env, logger) {
 		try {
 			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
-				logger.log('WARN', 'Supabase not configured, cannot add consumable pages');
+				logger.log('WARN', 'Supabase not configured, cannot add consumable credits');
 				return null;
 			}
 
@@ -1176,7 +1176,7 @@ export class DatabaseUtils {
 			// Get product information
 			const product = await DatabaseUtils.getProductById(productId, env, logger);
 			if (!product) {
-				logger.log('ERROR', 'Product not found for consumable pages', {
+				logger.log('ERROR', 'Product not found for consumable credits', {
 					productId: productId,
 					userId: userId
 				});
@@ -1201,14 +1201,14 @@ export class DatabaseUtils {
 			}
 
 			if (existingSubscriptions && existingSubscriptions.length > 0) {
-				// Add pages to existing subscription
+				// Add credits to existing subscription
 				const existingSubscription = existingSubscriptions[0];
-				const newPageLimit = existingSubscription.page_limit + pagesToAdd;
+				const newCreditLimit = existingSubscription.credit_limit + creditsToAdd;
 
 				const { data: updatedSubscription, error: updateError } = await supabase
 					.from('user_subscriptions')
 					.update({ 
-						page_limit: newPageLimit,
+						credit_limit: newCreditLimit,
 						updated_at: new Date().toISOString()
 					})
 					.eq('id', existingSubscription.id)
@@ -1216,7 +1216,7 @@ export class DatabaseUtils {
 					.single();
 
 				if (updateError) {
-					logger.log('ERROR', 'Failed to update subscription with consumable pages', {
+					logger.log('ERROR', 'Failed to update subscription with consumable credits', {
 						error: updateError.message,
 						subscriptionId: existingSubscription.id,
 						userId: userId
@@ -1224,11 +1224,11 @@ export class DatabaseUtils {
 					return null;
 				}
 
-				logger.log('INFO', 'Added consumable pages to existing subscription', {
+				logger.log('INFO', 'Added consumable credits to existing subscription', {
 					subscriptionId: updatedSubscription.id,
 					userId: userId,
-					pagesAdded: pagesToAdd,
-					newTotal: newPageLimit
+					creditsAdded: creditsToAdd,
+					newTotal: newCreditLimit
 				});
 
 				return updatedSubscription;
@@ -1246,8 +1246,8 @@ export class DatabaseUtils {
 					entitlement_id: null,
 					purchased_at: purchaseDate.toISOString(),
 					expires_at: expiresAt,
-					page_limit: pagesToAdd,
-					pages_used: 0,
+					credit_limit: creditsToAdd,
+					credits_used: 0,
 					is_active: true
 				};
 
@@ -1270,7 +1270,7 @@ export class DatabaseUtils {
 					subscriptionId: newSubscription.id,
 					userId: userId,
 					productId: productId,
-					pagesAdded: pagesToAdd
+					creditsAdded: creditsToAdd
 				});
 
 				return newSubscription;
@@ -1280,7 +1280,7 @@ export class DatabaseUtils {
 				error: error.message,
 				userId: userId,
 				productId: productId,
-				pagesToAdd: pagesToAdd
+				creditsToAdd: creditsToAdd
 			});
 			return null;
 		}

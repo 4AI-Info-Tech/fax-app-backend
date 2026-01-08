@@ -717,7 +717,7 @@ export default class extends WorkerEntrypoint {
 					}
 				}, callerEnvObj, this.logger);
 				
-				// Update subscription's pages_used field
+				// Update subscription's credits_used field
 				try {
 					// Find the user's active subscription to update
 					const { createClient } = await import('@supabase/supabase-js');
@@ -731,7 +731,7 @@ export default class extends WorkerEntrypoint {
 					// Get user's active subscriptions
 					const { data: subscriptions, error: subError } = await supabase
 						.from('user_subscriptions')
-						.select('id, pages_used')
+						.select('id, credits_used')
 						.eq('user_id', updatedFaxRecord.user_id)
 						.eq('is_active', true)
 						.gt('expires_at', new Date().toISOString())
@@ -740,34 +740,34 @@ export default class extends WorkerEntrypoint {
 					if (!subError && subscriptions && subscriptions.length > 0) {
 						// Update the first (most recent) active subscription
 						const subscription = subscriptions[0];
-						const newPagesUsed = (subscription.pages_used || 0) + finalPageCount;
+						const newCreditsUsed = (subscription.credits_used || 0) + finalPageCount;
 						
 						const { error: updateError } = await supabase
 							.from('user_subscriptions')
 							.update({ 
-								pages_used: newPagesUsed,
+								credits_used: newCreditsUsed,
 								updated_at: new Date().toISOString()
 							})
 							.eq('id', subscription.id);
 						
 						if (updateError) {
-							this.logger.log('ERROR', 'Failed to update subscription pages_used in webhook', {
+							this.logger.log('ERROR', 'Failed to update subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								pagesUsed: finalPageCount,
+								creditsUsed: finalPageCount,
 								error: updateError.message
 							});
 						} else {
-							this.logger.log('INFO', 'Updated subscription pages_used in webhook', {
+							this.logger.log('INFO', 'Updated subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								pagesUsed: finalPageCount,
-								newPagesUsed: newPagesUsed
+								creditsUsed: finalPageCount,
+								newCreditsUsed: newCreditsUsed
 							});
 						}
 					}
 				} catch (error) {
-					this.logger.log('ERROR', 'Error updating subscription pages_used in webhook', {
+					this.logger.log('ERROR', 'Error updating subscription credits_used in webhook', {
 						userId: updatedFaxRecord.user_id,
 						error: error.message
 					});
@@ -902,7 +902,7 @@ export default class extends WorkerEntrypoint {
 					}
 				}, callerEnvObj, this.logger);
 				
-				// Update subscription's pages_used field
+				// Update subscription's credits_used field
 				try {
 					// Find the user's active subscription to update
 					const { createClient } = await import('@supabase/supabase-js');
@@ -916,7 +916,7 @@ export default class extends WorkerEntrypoint {
 					// Get user's active subscriptions
 					const { data: subscriptions, error: subError } = await supabase
 						.from('user_subscriptions')
-						.select('id, pages_used')
+						.select('id, credits_used')
 						.eq('user_id', updatedFaxRecord.user_id)
 						.eq('is_active', true)
 						.gt('expires_at', new Date().toISOString())
@@ -925,34 +925,34 @@ export default class extends WorkerEntrypoint {
 					if (!subError && subscriptions && subscriptions.length > 0) {
 						// Update the first (most recent) active subscription
 						const subscription = subscriptions[0];
-						const newPagesUsed = (subscription.pages_used || 0) + finalPageCount;
+						const newCreditsUsed = (subscription.credits_used || 0) + finalPageCount;
 						
 						const { error: updateError } = await supabase
 							.from('user_subscriptions')
 							.update({ 
-								pages_used: newPagesUsed,
+								credits_used: newCreditsUsed,
 								updated_at: new Date().toISOString()
 							})
 							.eq('id', subscription.id);
 						
 						if (updateError) {
-							this.logger.log('ERROR', 'Failed to update subscription pages_used in webhook', {
+							this.logger.log('ERROR', 'Failed to update subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								pagesUsed: finalPageCount,
+								creditsUsed: finalPageCount,
 								error: updateError.message
 							});
 						} else {
-							this.logger.log('INFO', 'Updated subscription pages_used in webhook', {
+							this.logger.log('INFO', 'Updated subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								pagesUsed: finalPageCount,
-								newPagesUsed: newPagesUsed
+								creditsUsed: finalPageCount,
+								newCreditsUsed: newCreditsUsed
 							});
 						}
 					}
 				} catch (error) {
-					this.logger.log('ERROR', 'Error updating subscription pages_used in webhook', {
+					this.logger.log('ERROR', 'Error updating subscription credits_used in webhook', {
 						userId: updatedFaxRecord.user_id,
 						error: error.message
 					});

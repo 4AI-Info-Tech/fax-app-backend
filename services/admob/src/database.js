@@ -116,8 +116,8 @@ export class DatabaseUtils {
 				throw insertError;
 			}
 			
-			// Grant pages using the stored procedure
-			const { error: grantError } = await supabase.rpc('grant_pages', {
+			// Grant credits using the stored procedure
+			const { error: grantError } = await supabase.rpc('grant_credits', {
 				p_user_id: userId,
 				p_amount: rewardAmount || 1,
 				p_source: 'rewarded_video',
@@ -131,12 +131,12 @@ export class DatabaseUtils {
 			});
 			
 			if (grantError) {
-				logger?.log('ERROR', 'Error granting pages', { error: grantError.message });
+				logger?.log('ERROR', 'Error granting credits', { error: grantError.message });
 				// Don't throw - completion was recorded, pages grant failed
 				return { 
 					success: true, 
 					completionId: completion.id,
-					pagesGranted: false,
+					creditsGranted: false,
 					grantError: grantError.message
 				};
 			}

@@ -250,39 +250,39 @@ export class RevenueCatUtils {
 	}
 
 	/**
-	 * Check if a subscription has remaining pages
+	 * Check if a subscription has remaining credits
 	 * @param {Object} subscription - The subscription object
-	 * @returns {boolean} - True if has remaining pages, false otherwise
+	 * @returns {boolean} - True if has remaining credits, false otherwise
 	 */
 	static hasRemainingPages(subscription) {
 		if (!subscription) {
 			return false;
 		}
 
-		// If page_limit is 0, it means unlimited pages
-		if (subscription.page_limit === 0) {
+		// If credit_limit is 0, it means unlimited credits
+		if (subscription.credit_limit === 0) {
 			return true;
 		}
 
-		return subscription.pages_used < subscription.page_limit;
+		return subscription.credits_used < subscription.credit_limit;
 	}
 
 	/**
-	 * Get remaining pages for a subscription
+	 * Get remaining credits for a subscription
 	 * @param {Object} subscription - The subscription object
-	 * @returns {number} - Number of remaining pages, -1 for unlimited
+	 * @returns {number} - Number of remaining credits, -1 for unlimited
 	 */
 	static getRemainingPages(subscription) {
 		if (!subscription) {
 			return 0;
 		}
 
-		// If page_limit is 0, it means unlimited pages
-		if (subscription.page_limit === 0) {
+		// If credit_limit is 0, it means unlimited credits
+		if (subscription.credit_limit === 0) {
 			return -1; // -1 indicates unlimited
 		}
 
-		return Math.max(0, subscription.page_limit - subscription.pages_used);
+		return Math.max(0, subscription.credit_limit - subscription.credits_used);
 	}
 
 	/**
