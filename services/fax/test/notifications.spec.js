@@ -83,6 +83,9 @@ describe('NotificationService', () => {
         global.fetch.mockReset();
         global.fetch.mockResolvedValue({
             ok: true,
+            status: 200,
+            statusText: 'OK',
+            headers: new Headers(),
             json: () => Promise.resolve({ id: 'notification-123', recipients: 1 })
         });
     });
@@ -305,6 +308,8 @@ describe('NotificationService', () => {
             global.fetch.mockResolvedValue({
                 ok: false,
                 status: 400,
+                statusText: 'Bad Request',
+                headers: new Headers(),
                 json: () => Promise.resolve({ errors: ['Invalid player id'] })
             });
 

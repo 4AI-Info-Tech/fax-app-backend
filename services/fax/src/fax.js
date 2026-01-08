@@ -641,11 +641,12 @@ export default class extends WorkerEntrypoint {
 			const body = await request.json();
 
 			const eventType = body?.data?.event_type || 'unknown';
-			const payload = body?.data?.payload || {};
+			// Handle both nested payload structure and direct payload structure
+			const payload = body?.data?.payload || body?.payload || body || {};
 			const telnyxFaxId = payload.fax_id || null;
-			const statusFromPayload = payload.status || null;
-			const failureReason = payload.failure_reason || null;
-			const pageCount = payload.page_count || null;
+			const statusFromPayload = payload.hasOwnProperty('status') ? payload.status : null;
+			const failureReason = payload.hasOwnProperty('failure_reason') ? payload.failure_reason : null;
+			const pageCount = payload.hasOwnProperty('page_count') ? payload.page_count : null;
 			const toNumber = payload.to || null;
 
 			// Check if this is a fax receiving event and if the 'to' number matches our sender ID
@@ -671,20 +672,46 @@ export default class extends WorkerEntrypoint {
 
 			// Create a temporary TelnyxProvider instance to reuse its status mapping helper
 			const tempProvider = new TelnyxProvider('temp', this.logger, { connectionId: 'temp' });
-			const standardizedStatus = tempProvider.mapStatus(failureReason || statusFromPayload);
+			// Use failure_reason for status mapping if available (it provides more specific error info),
+			// otherwise use the status field
+			const statusForMapping = failureReason || statusFromPayload;
+			const standardizedStatus = tempProvider.mapStatus(statusForMapping);
 
-			// Build update data for Supabase
+			// Build update data for Supabase - only include fields that exist in the payload
 			const updateData = {
 				status: standardizedStatus,
-				original_status: statusFromPayload,
-				error_message: failureReason || null,
-				metadata: payload,
-				completed_at: ['delivered', 'failed', 'cancelled'].includes(standardizedStatus) ? new Date().toISOString() : null
+				metadata: payload
 			};
 
+			// Only include original_status if status exists in payload
+			if (statusFromPayload !== null) {
+				updateData.original_status = statusFromPayload;
+			}
+
+			// Always save failure_reason as error_message when status is "failed" and failure_reason exists
+			// Also save it if it exists regardless of status (for edge cases)
+			if (failureReason !== null) {
+				updateData.error_message = failureReason;
+			} else if (standardizedStatus === 'failed' && statusFromPayload === 'failed') {
+				// If status is "failed" but no failure_reason provided, log a warning
+				this.logger.log('WARN', 'Fax status is "failed" but no failure_reason provided in webhook', {
+					faxId: telnyxFaxId,
+					eventType
+				});
+			}
+
+			// Only include completed_at if status is terminal
+			if (['delivered', 'failed', 'cancelled'].includes(standardizedStatus)) {
+				updateData.completed_at = new Date().toISOString();
+			}
+
 			// Add page count if available and valid in the webhook payload
+			// Don't update page_count to 0 when status is "failed"
 			if (pageCount !== null && pageCount !== undefined && pageCount > 0) {
 				updateData.pages = pageCount;
+			} else if (pageCount === 0 && standardizedStatus !== 'failed') {
+				// Only update to 0 if status is not "failed"
+				updateData.pages = 0;
 			}
 
 			// Update fax record using provider_fax_id as lookup key

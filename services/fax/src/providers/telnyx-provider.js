@@ -360,11 +360,12 @@ export class TelnyxProvider {
 		// Map Telnyx-specific statuses to DB enum fax_status values
 		const statusMap = {
 			// Standard flow statuses
-			'queued': 'queued',
+			'queued': 'sending',
 			'sending': 'sending',
+			'media.processed': 'sending',
 			'delivered': 'delivered',
 			'failed': 'failed',
-			'canceled': 'cancelled',
+			'canceled': 'failed',
 
 			// Error / edge-case statuses reported by Telnyx
 			'receiver_no_answer': 'no-answer',

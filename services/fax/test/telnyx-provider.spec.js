@@ -179,7 +179,7 @@ describe('TelnyxProvider', () => {
 
 			expect(result).toEqual({
 				id: 'telnyx-fax-123',
-				status: 'queued',
+				status: 'sending',
 				originalStatus: 'queued',
 				message: 'Fax submitted to Telnyx successfully',
 				timestamp: expect.any(String),
@@ -453,7 +453,7 @@ describe('TelnyxProvider', () => {
 				{
 					provider_fax_id: 'telnyx-fax-456',
 					metadata: telnyxResponse,
-					status: 'queued',
+					status: 'sending',
 					sent_at: expect.any(String),
 					updated_at: expect.any(String)
 				},
@@ -473,11 +473,12 @@ describe('TelnyxProvider', () => {
 
 	describe('mapStatus', () => {
 		it('should map Telnyx statuses to standard statuses', () => {
-			expect(telnyxProvider.mapStatus('queued')).toBe('queued');
+			expect(telnyxProvider.mapStatus('queued')).toBe('sending');
 			expect(telnyxProvider.mapStatus('sending')).toBe('sending');
+			expect(telnyxProvider.mapStatus('media.processed')).toBe('sending');
 			expect(telnyxProvider.mapStatus('delivered')).toBe('delivered');
 			expect(telnyxProvider.mapStatus('failed')).toBe('failed');
-			expect(telnyxProvider.mapStatus('canceled')).toBe('cancelled');
+			expect(telnyxProvider.mapStatus('canceled')).toBe('failed');
 			expect(telnyxProvider.mapStatus('unknown')).toBe('failed');
 		});
 	});
@@ -494,7 +495,7 @@ describe('TelnyxProvider', () => {
 
 			expect(result).toEqual({
 				id: 'telnyx-fax-123',
-				status: 'queued',
+				status: 'sending',
 				originalStatus: 'queued',
 				message: 'Fax submitted to Telnyx successfully',
 				timestamp: expect.any(String),

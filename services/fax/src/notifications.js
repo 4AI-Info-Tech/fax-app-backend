@@ -27,21 +27,54 @@ export class NotificationService {
      * @returns {Promise<Object>} OneSignal API response
      */
     async sendPushNotification(env, userId, notification) {
+        this.logger.log('DEBUG', 'sendPushNotification called', {
+            userId,
+            notification: {
+                faxId: notification?.faxId,
+                status: notification?.status,
+                title: notification?.title,
+                message: notification?.message?.substring(0, 100), // Truncate long messages
+                recipientNumber: notification?.recipientNumber
+            }
+        });
+
         try {
             // Validate required environment variables
+            this.logger.log('DEBUG', 'Validating environment variables', {
+                hasAppId: !!env.ONESIGNAL_APP_ID,
+                hasApiKey: !!env.ONESIGNAL_REST_API_KEY,
+                appIdLength: env.ONESIGNAL_APP_ID?.length || 0,
+                apiKeyLength: env.ONESIGNAL_REST_API_KEY?.length || 0
+            });
+
             if (!env.ONESIGNAL_APP_ID) {
-                this.logger.log('WARN', 'OneSignal App ID not configured, skipping push notification');
+                this.logger.log('WARN', 'OneSignal App ID not configured, skipping push notification', {
+                    userId,
+                    faxId: notification?.faxId
+                });
                 return { success: false, error: 'OneSignal App ID not configured' };
             }
 
             if (!env.ONESIGNAL_REST_API_KEY) {
-                this.logger.log('WARN', 'OneSignal REST API Key not configured, skipping push notification');
+                this.logger.log('WARN', 'OneSignal REST API Key not configured, skipping push notification', {
+                    userId,
+                    faxId: notification?.faxId
+                });
                 return { success: false, error: 'OneSignal REST API Key not configured' };
             }
 
             if (!userId) {
-                this.logger.log('WARN', 'User ID not provided, skipping push notification');
+                this.logger.log('WARN', 'User ID not provided, skipping push notification', {
+                    faxId: notification?.faxId,
+                    notificationProvided: !!notification
+                });
                 return { success: false, error: 'User ID not provided' };
+            }
+
+            // Validate notification object
+            if (!notification) {
+                this.logger.log('WARN', 'Notification object not provided', { userId });
+                return { success: false, error: 'Notification object not provided' };
             }
 
             // Build the notification payload
@@ -60,12 +93,29 @@ export class NotificationService {
                 ios_badgeCount: 1
             };
 
+            this.logger.log('DEBUG', 'Built OneSignal payload', {
+                userId,
+                faxId: notification.faxId,
+                status: notification.status,
+                payloadSize: JSON.stringify(payload).length,
+                payloadPreview: {
+                    app_id: payload.app_id,
+                    external_user_ids: payload.include_external_user_ids,
+                    title: payload.headings.en,
+                    messageLength: payload.contents.en?.length || 0,
+                    dataKeys: Object.keys(payload.data)
+                }
+            });
+
             this.logger.log('DEBUG', 'Sending push notification via OneSignal', {
                 userId,
                 faxId: notification.faxId,
-                status: notification.status
+                status: notification.status,
+                apiUrl: this.oneSignalApiUrl,
+                timestamp: new Date().toISOString()
             });
 
+            const requestStartTime = Date.now();
             const response = await fetch(this.oneSignalApiUrl, {
                 method: 'POST',
                 headers: {
@@ -75,12 +125,39 @@ export class NotificationService {
                 body: JSON.stringify(payload)
             });
 
+            const requestDuration = Date.now() - requestStartTime;
+            this.logger.log('DEBUG', 'OneSignal API request completed', {
+                userId,
+                faxId: notification.faxId,
+                statusCode: response.status,
+                statusText: response.statusText,
+                durationMs: requestDuration,
+                headers: Object.fromEntries(response.headers.entries())
+            });
+
             const responseData = await response.json();
+            this.logger.log('DEBUG', 'OneSignal API response received', {
+                userId,
+                faxId: notification.faxId,
+                responseStatus: response.status,
+                responseData: {
+                    id: responseData.id,
+                    recipients: responseData.recipients,
+                    errors: responseData.errors,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids,
+                    hasErrors: !!responseData.errors
+                }
+            });
 
             if (!response.ok) {
                 this.logger.log('ERROR', 'OneSignal API returned error', {
+                    userId,
+                    faxId: notification.faxId,
                     status: response.status,
-                    error: responseData.errors || responseData
+                    statusText: response.statusText,
+                    error: responseData.errors || responseData,
+                    fullResponse: responseData,
+                    requestDurationMs: requestDuration
                 });
                 return {
                     success: false,
@@ -92,8 +169,12 @@ export class NotificationService {
             this.logger.log('INFO', 'Push notification sent successfully', {
                 userId,
                 faxId: notification.faxId,
+                status: notification.status,
                 oneSignalId: responseData.id,
-                recipients: responseData.recipients
+                recipients: responseData.recipients,
+                recipientCount: responseData.recipients || 0,
+                requestDurationMs: requestDuration,
+                timestamp: new Date().toISOString()
             });
 
             return {
@@ -105,8 +186,12 @@ export class NotificationService {
         } catch (error) {
             this.logger.log('ERROR', 'Error sending push notification', {
                 error: error.message,
+                errorStack: error.stack,
+                errorName: error.name,
                 userId,
-                faxId: notification?.faxId
+                faxId: notification?.faxId,
+                notificationProvided: !!notification,
+                notificationKeys: notification ? Object.keys(notification) : []
             });
             return {
                 success: false,
@@ -127,28 +212,69 @@ export class NotificationService {
      * @returns {Promise<Object>} Notification send result
      */
     async sendFaxStatusNotification(env, fax) {
+        this.logger.log('DEBUG', 'sendFaxStatusNotification called', {
+            faxId: fax?.id,
+            userId: fax?.user_id,
+            status: fax?.status,
+            hasRecipients: Array.isArray(fax?.recipients),
+            recipientCount: Array.isArray(fax?.recipients) ? fax.recipients.length : 0,
+            hasErrorMessage: !!fax?.error_message,
+            errorMessage: fax?.error_message?.substring(0, 200) // Truncate long error messages
+        });
+
         try {
             if (!fax || !fax.user_id) {
-                this.logger.log('WARN', 'Invalid fax data for notification', { fax });
+                this.logger.log('WARN', 'Invalid fax data for notification', {
+                    faxProvided: !!fax,
+                    hasUserId: !!fax?.user_id,
+                    faxKeys: fax ? Object.keys(fax) : [],
+                    faxData: fax
+                });
                 return { success: false, error: 'Invalid fax data' };
             }
+
+            this.logger.log('DEBUG', 'Fetching user notification preferences', {
+                userId: fax.user_id,
+                faxId: fax.id
+            });
 
             // Check if user has notifications enabled
             const userPreferences = await this.getUserNotificationPreferences(env, fax.user_id);
             
+            this.logger.log('DEBUG', 'User notification preferences retrieved', {
+                userId: fax.user_id,
+                faxId: fax.id,
+                hasPreferences: !!userPreferences,
+                preferences: userPreferences ? {
+                    fax_delivered_enabled: userPreferences.fax_delivered_enabled,
+                    fax_failed_enabled: userPreferences.fax_failed_enabled
+                } : null
+            });
+            
             const isSuccess = fax.status === 'delivered';
+            this.logger.log('DEBUG', 'Determined notification type', {
+                userId: fax.user_id,
+                faxId: fax.id,
+                faxStatus: fax.status,
+                isSuccess,
+                notificationType: isSuccess ? 'delivered' : 'failed'
+            });
             
             // Check user preferences for this notification type
             if (isSuccess && userPreferences && !userPreferences.fax_delivered_enabled) {
                 this.logger.log('DEBUG', 'User has disabled delivered notifications', {
-                    userId: fax.user_id
+                    userId: fax.user_id,
+                    faxId: fax.id,
+                    preferences: userPreferences
                 });
                 return { success: false, skipped: true, reason: 'User disabled delivered notifications' };
             }
             
             if (!isSuccess && userPreferences && !userPreferences.fax_failed_enabled) {
                 this.logger.log('DEBUG', 'User has disabled failed notifications', {
-                    userId: fax.user_id
+                    userId: fax.user_id,
+                    faxId: fax.id,
+                    preferences: userPreferences
                 });
                 return { success: false, skipped: true, reason: 'User disabled failed notifications' };
             }
@@ -158,6 +284,22 @@ export class NotificationService {
                 ? fax.recipients[0]
                 : 'Unknown';
 
+            this.logger.log('DEBUG', 'Processing recipient number', {
+                userId: fax.user_id,
+                faxId: fax.id,
+                rawRecipientNumber: recipientNumber,
+                recipientCount: Array.isArray(fax.recipients) ? fax.recipients.length : 0,
+                allRecipients: fax.recipients
+            });
+
+            const formattedNumber = this.formatPhoneNumber(recipientNumber);
+            this.logger.log('DEBUG', 'Formatted phone number', {
+                userId: fax.user_id,
+                faxId: fax.id,
+                original: recipientNumber,
+                formatted: formattedNumber
+            });
+
             // Build notification content
             const notification = {
                 faxId: fax.id,
@@ -165,17 +307,46 @@ export class NotificationService {
                 recipientNumber: recipientNumber,
                 title: isSuccess ? 'Fax Delivered!' : 'Fax Failed',
                 message: isSuccess
-                    ? `Your fax to ${this.formatPhoneNumber(recipientNumber)} was delivered successfully.`
-                    : `Your fax to ${this.formatPhoneNumber(recipientNumber)} could not be delivered.${fax.error_message ? ` Reason: ${fax.error_message}` : ''}`
+                    ? `Your fax to ${formattedNumber} was delivered successfully.`
+                    : `Your fax to ${formattedNumber} could not be delivered.${fax.error_message ? ` Reason: ${fax.error_message}` : ''}`
             };
 
-            return await this.sendPushNotification(env, fax.user_id, notification);
+            this.logger.log('DEBUG', 'Built notification object', {
+                userId: fax.user_id,
+                faxId: fax.id,
+                notification: {
+                    faxId: notification.faxId,
+                    status: notification.status,
+                    title: notification.title,
+                    messageLength: notification.message.length,
+                    recipientNumber: notification.recipientNumber
+                }
+            });
+
+            const result = await this.sendPushNotification(env, fax.user_id, notification);
+            
+            this.logger.log('DEBUG', 'sendFaxStatusNotification completed', {
+                userId: fax.user_id,
+                faxId: fax.id,
+                result: {
+                    success: result.success,
+                    skipped: result.skipped,
+                    error: result.error,
+                    oneSignalId: result.id
+                }
+            });
+
+            return result;
 
         } catch (error) {
             this.logger.log('ERROR', 'Error sending fax status notification', {
                 error: error.message,
+                errorStack: error.stack,
+                errorName: error.name,
                 faxId: fax?.id,
-                userId: fax?.user_id
+                userId: fax?.user_id,
+                faxProvided: !!fax,
+                faxKeys: fax ? Object.keys(fax) : []
             });
             return {
                 success: false,
@@ -191,11 +362,28 @@ export class NotificationService {
      * @returns {Promise<Object|null>} User notification preferences or null
      */
     async getUserNotificationPreferences(env, userId) {
+        this.logger.log('DEBUG', 'getUserNotificationPreferences called', {
+            userId,
+            hasSupabaseUrl: !!env.SUPABASE_URL,
+            hasServiceRoleKey: !!env.SUPABASE_SERVICE_ROLE_KEY,
+            supabaseUrlLength: env.SUPABASE_URL?.length || 0,
+            serviceRoleKeyLength: env.SUPABASE_SERVICE_ROLE_KEY?.length || 0
+        });
+
         try {
             if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
-                this.logger.log('DEBUG', 'Supabase not configured, using default notification preferences');
+                this.logger.log('DEBUG', 'Supabase not configured, using default notification preferences', {
+                    userId,
+                    hasSupabaseUrl: !!env.SUPABASE_URL,
+                    hasServiceRoleKey: !!env.SUPABASE_SERVICE_ROLE_KEY
+                });
                 return null;
             }
+
+            this.logger.log('DEBUG', 'Creating Supabase client', {
+                userId,
+                supabaseUrl: env.SUPABASE_URL.substring(0, 30) + '...' // Log partial URL for debugging
+            });
 
             const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
                 auth: {
@@ -204,32 +392,64 @@ export class NotificationService {
                 }
             });
 
+            this.logger.log('DEBUG', 'Querying user_notification_settings table', {
+                userId,
+                table: 'user_notification_settings'
+            });
+
+            const queryStartTime = Date.now();
             const { data, error } = await supabase
                 .from('user_notification_settings')
                 .select('*')
                 .eq('user_id', userId)
                 .single();
 
+            const queryDuration = Date.now() - queryStartTime;
+
+            this.logger.log('DEBUG', 'Supabase query completed', {
+                userId,
+                queryDurationMs: queryDuration,
+                hasError: !!error,
+                errorCode: error?.code,
+                errorMessage: error?.message,
+                hasData: !!data,
+                dataKeys: data ? Object.keys(data) : []
+            });
+
             if (error) {
                 if (error.code === 'PGRST116') {
                     // No preferences found - use defaults (all enabled)
                     this.logger.log('DEBUG', 'No notification preferences found for user, using defaults', {
-                        userId
+                        userId,
+                        errorCode: error.code,
+                        queryDurationMs: queryDuration
                     });
                     return null;
                 }
                 this.logger.log('ERROR', 'Error fetching notification preferences', {
                     error: error.message,
-                    userId
+                    errorCode: error.code,
+                    errorDetails: error.details,
+                    errorHint: error.hint,
+                    userId,
+                    queryDurationMs: queryDuration
                 });
                 return null;
             }
+
+            this.logger.log('DEBUG', 'User notification preferences retrieved successfully', {
+                userId,
+                preferences: data,
+                queryDurationMs: queryDuration
+            });
 
             return data;
 
         } catch (error) {
             this.logger.log('ERROR', 'Error getting user notification preferences', {
                 error: error.message,
+                errorStack: error.stack,
+                errorName: error.name,
                 userId
             });
             return null;
@@ -242,22 +462,49 @@ export class NotificationService {
      * @returns {string} Formatted phone number
      */
     formatPhoneNumber(phoneNumber) {
+        this.logger.log('DEBUG', 'formatPhoneNumber called', {
+            phoneNumber,
+            type: typeof phoneNumber,
+            isString: typeof phoneNumber === 'string',
+            length: phoneNumber?.length
+        });
+
         if (!phoneNumber || typeof phoneNumber !== 'string') {
+            this.logger.log('DEBUG', 'Invalid phone number input, returning Unknown', {
+                phoneNumber,
+                type: typeof phoneNumber
+            });
             return 'Unknown';
         }
 
         // Remove all non-digit characters except +
         const cleaned = phoneNumber.replace(/[^\d+]/g, '');
+        this.logger.log('DEBUG', 'Cleaned phone number', {
+            original: phoneNumber,
+            cleaned,
+            cleanedLength: cleaned.length
+        });
         
         // If it's a US number (starts with +1 and has 11 digits)
         if (cleaned.startsWith('+1') && cleaned.length === 12) {
             const areaCode = cleaned.slice(2, 5);
             const firstPart = cleaned.slice(5, 8);
             const lastPart = cleaned.slice(8);
-            return `+1 (${areaCode}) ${firstPart}-${lastPart}`;
+            const formatted = `+1 (${areaCode}) ${firstPart}-${lastPart}`;
+            this.logger.log('DEBUG', 'Formatted US phone number', {
+                original: phoneNumber,
+                cleaned,
+                formatted
+            });
+            return formatted;
         }
 
         // Return as-is for international numbers
+        this.logger.log('DEBUG', 'Phone number not US format, returning as-is', {
+            original: phoneNumber,
+            cleaned,
+            isUSFormat: cleaned.startsWith('+1') && cleaned.length === 12
+        });
         return phoneNumber;
     }
 
