@@ -78,6 +78,7 @@ export class TelnyxProvider {
 
 	async processJsonFiles(files) {
 		const processedFiles = [];
+		let totalPages = 0;
 
 		for (let i = 0; i < files.length; i++) {
 			const file = files[i];
@@ -87,6 +88,14 @@ export class TelnyxProvider {
 					const buffer = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
 					const blob = new Blob([buffer], { type: file.mimeType || 'application/pdf' });
 					processedFiles.push(blob);
+					
+					// Extract page count from file if provided (handle both camelCase and snake_case)
+					const pageCount = file.pageCount || file.page_count;
+					if (pageCount && typeof pageCount === 'number') {
+						totalPages += pageCount;
+					} else {
+						totalPages += 1; // Default to 1 page if not specified
+					}
 				} catch (base64Error) {
 					this.logger.log('ERROR', `Failed to decode base64 for file ${i}`, {
 						error: base64Error.message
@@ -95,8 +104,13 @@ export class TelnyxProvider {
 				}
 			} else {
 				processedFiles.push(file);
+				totalPages += 1; // Default to 1 page for non-base64 files
 			}
 		}
+
+		// Store total pages and document count in the processed files array metadata
+		processedFiles._totalPages = totalPages;
+		processedFiles._documentCount = files.length;
 
 		return processedFiles;
 	}
@@ -162,9 +176,9 @@ export class TelnyxProvider {
 			await this.updateFaxRecordWithR2Urls(faxRecord.id, mediaUrls);
 			this.logger.log('INFO', 'Step 3 complete: Fax record updated with R2 URLs');
 
-			// Step 4: Send fax via Telnyx API using first R2 URL
-			const telnyxResponse = await this.sendToTelnyx(faxRequest, mediaUrls[0]);
-			this.logger.log('INFO', 'Step 4 complete: Fax sent to Telnyx', { telnyxFaxId: telnyxResponse.id });
+			// Step 4: Send fax via Telnyx API using all R2 URLs as array
+			const telnyxResponse = await this.sendToTelnyx(faxRequest, mediaUrls);
+			this.logger.log('INFO', 'Step 4 complete: Fax sent to Telnyx', { telnyxFaxId: telnyxResponse.id, documentCount: mediaUrls.length });
 
 			// Step 5: Update fax record with Telnyx response
 			await this.updateFaxRecordWithTelnyxResponse(faxRecord.id, telnyxResponse);
@@ -188,6 +202,10 @@ export class TelnyxProvider {
 	 * @returns {object} Created fax record
 	 */
 	async createInitialFaxRecord(faxRequest, userId) {
+		// Calculate document count and total pages from files
+		const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
+		const totalPages = faxRequest.files?._totalPages || 1;
+		
 		const faxData = {
 			user_id: userId,
 			recipients: faxRequest.recipients || [],
@@ -196,6 +214,8 @@ export class TelnyxProvider {
 			// Use DB enum-compatible status while retaining provider-specific state in originalStatus
 			status: 'queued',
 			original_status: 'preparing',
+			pages: totalPages,
+			document_count: documentCount,
 			created_at: new Date().toISOString()
 		};
 
@@ -281,18 +301,24 @@ export class TelnyxProvider {
 	/**
 	 * Send fax to Telnyx API
 	 * @param {object} faxRequest - Original fax request
-	 * @param {string} mediaUrl - R2 public URL
+	 * @param {string|array} mediaUrls - R2 public URL(s) - can be single URL or array of URLs
 	 * @returns {object} Telnyx API response
 	 */
-	async sendToTelnyx(faxRequest, mediaUrl) {
+	async sendToTelnyx(faxRequest, mediaUrls) {
 		const payload = await this.buildPayload(faxRequest);
-		payload.media_url = mediaUrl;
+		// Support both single URL and array of URLs
+		if (Array.isArray(mediaUrls)) {
+			payload.media_url = mediaUrls; // Send as array for multiple documents
+		} else {
+			payload.media_url = mediaUrls; // Single URL (backward compatibility)
+		}
 
 		this.logger.log('DEBUG', 'Sending fax to Telnyx', {
 			endpoint: `${this.baseUrl}/v2/faxes`,
 			to: payload.to.replace(/\d/g, '*'),
 			from: payload.from.replace(/\d/g, '*'),
-			hasMediaUrl: !!payload.media_url
+			hasMediaUrl: !!payload.media_url,
+			mediaUrlCount: Array.isArray(payload.media_url) ? payload.media_url.length : (payload.media_url ? 1 : 0)
 		});
 
 		const response = await fetch(`${this.baseUrl}/v2/faxes`, {

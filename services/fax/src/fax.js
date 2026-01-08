@@ -257,8 +257,12 @@ export default class extends WorkerEntrypoint {
 
 			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || sagContextObj.user?.id || null;
 			
+			// Calculate total pages and document count from files
+			const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
+			const totalPages = faxRequest.files?._totalPages || faxRequest.pages || 1;
+			
 			// Check user credits before sending fax
-			const pagesRequired = faxRequest.pages || 1; // Default to 1 page if not specified
+			const pagesRequired = totalPages;
 			// Use caller environment for database operations (contains Supabase configuration)
 			let creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, pagesRequired, callerEnvObj, this.logger);
 			
@@ -396,10 +400,12 @@ export default class extends WorkerEntrypoint {
 					message: "Fax is now queued for processing",
 					timestamp: new Date().toISOString(),
 					recipient: faxRequest.recipients?.[0] || 'unknown',
-					pages: 1,
+					pages: totalPages,
+					document_count: documentCount,
 					cost: null,
 					apiProvider: faxProvider.getProviderName(),
-					providerResponse: faxResult.providerResponse
+					providerResponse: faxResult.providerResponse,
+					credits: 1
 				}
 			};
 
@@ -592,6 +598,10 @@ export default class extends WorkerEntrypoint {
 				providerName
 			});
 
+			// Calculate document count and total pages from files
+			const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
+			const totalPages = faxRequest.files?._totalPages || 1;
+
 			const faxDataForSave = {
 				id: faxResult.id,
 				status: faxResult.status || 'queued',
@@ -599,7 +609,8 @@ export default class extends WorkerEntrypoint {
 				recipients: faxRequest.recipients || [],
 				senderId: faxRequest.senderId,
 				subject: faxRequest.subject || faxRequest.message,
-				pages: 1,
+				pages: totalPages,
+				document_count: documentCount,
 				cost: null,
 				clientReference: faxRequest.clientReference || 'SendFaxPro',
 				sentAt: new Date().toISOString(),

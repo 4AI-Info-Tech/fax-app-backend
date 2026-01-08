@@ -45,6 +45,7 @@ export class DatabaseUtils {
 				sender_id: faxData.senderId || null,
 				subject: faxData.subject || null,
 				pages: faxData.pages || 0,
+				document_count: faxData.document_count || 1,
 				cost: faxData.cost || null,
 				client_reference: faxData.clientReference || 'SendFaxPro',
 				sent_at: faxData.sentAt || new Date().toISOString(),

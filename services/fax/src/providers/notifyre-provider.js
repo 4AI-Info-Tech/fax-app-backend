@@ -68,6 +68,7 @@ export class NotifyreProvider {
 
 	async processJsonFiles(files) {
 		const processedFiles = [];
+		let totalPages = 0;
 
 		for (let i = 0; i < files.length; i++) {
 			const file = files[i];
@@ -77,6 +78,14 @@ export class NotifyreProvider {
 					const buffer = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
 					const blob = new Blob([buffer], { type: file.mimeType || 'application/pdf' });
 					processedFiles.push(blob);
+					
+					// Extract page count from file if provided (handle both camelCase and snake_case)
+					const pageCount = file.pageCount || file.page_count;
+					if (pageCount && typeof pageCount === 'number') {
+						totalPages += pageCount;
+					} else {
+						totalPages += 1; // Default to 1 page if not specified
+					}
 				} catch (base64Error) {
 					this.logger.log('ERROR', `Failed to decode base64 for file ${i}`, {
 						error: base64Error.message
@@ -85,8 +94,13 @@ export class NotifyreProvider {
 				}
 			} else {
 				processedFiles.push(file);
+				totalPages += 1; // Default to 1 page for non-base64 files
 			}
 		}
+
+		// Store total pages and document count in the processed files array metadata
+		processedFiles._totalPages = totalPages;
+		processedFiles._documentCount = files.length;
 
 		return processedFiles;
 	}
