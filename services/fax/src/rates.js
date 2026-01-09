@@ -105,12 +105,37 @@ export function calculateRate(lookupData, dialedDigits, prefixes, rates) {
 
 	const billed = lrnMatch || dialedMatch; // LRN-first, dialed fallback
 
+	// Calculate credit per page if rate is available
+	const creditPerPage = billed ? calculateCreditPerPage(billed.rate_usd_per_min) : null;
+
 	return {
 		lrnPrefix: lrnPrefix || null,
 		lrnMatch,
 		dialedMatch,
-		billed
+		billed,
+		creditPerPage
 	};
+}
+
+/**
+ * Calculate credit required per page based on rate
+ * Formula: (1 min call per page + 0.007 per page) / 0.012$ per page
+ * @param {number} rateUsdPerMin - Rate in USD per minute
+ * @returns {number} Credit required per page (ceiled to integer)
+ */
+export function calculateCreditPerPage(rateUsdPerMin) {
+	if (rateUsdPerMin === null || rateUsdPerMin === undefined || isNaN(rateUsdPerMin)) {
+		return null;
+	}
+
+	const FIXED_COST_PER_PAGE = 0.007;
+	const PRICE_PER_PAGE = 0.012;
+	
+	// Credit = (1 min call per page + fixed cost per page) / price per page
+	const credit = (rateUsdPerMin + FIXED_COST_PER_PAGE) / PRICE_PER_PAGE;
+	
+	// Ceil to integer
+	return Math.ceil(credit);
 }
 
 // Import rate table JSON file

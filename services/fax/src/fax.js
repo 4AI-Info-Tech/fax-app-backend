@@ -9,7 +9,7 @@ import { NotifyreProvider } from './providers/notifyre-provider.js';
 import { TelnyxProvider } from './providers/telnyx-provider.js';
 import { R2Utils } from './r2-utils.js';
 import { NotificationService } from './notifications.js';
-import { digitsOnly, calculateRate, getRateTables } from './rates.js';
+import { digitsOnly, calculateRate, getRateTables, calculateCreditPerPage } from './rates.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -262,10 +262,23 @@ export default class extends WorkerEntrypoint {
 			const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
 			const totalPages = faxRequest.files?._totalPages || faxRequest.pages || 1;
 			
+			// Get recipient phone number and calculate credits required
+			const recipientNumber = faxRequest.recipients?.[0] || null;
+			const creditCalculation = await this.calculateFaxCredits(
+				recipientNumber,
+				totalPages,
+				callerEnvObj,
+				request
+			);
+			
+			const creditPerPage = creditCalculation.creditPerPage;
+			const creditsRequired = creditCalculation.creditsRequired;
+			const rateInfo = creditCalculation.rateInfo;
+			
 			// Check user credits before sending fax
-			const pagesRequired = totalPages;
+			// Note: The database stores credits as pages, so we need to check if availablePages >= creditsRequired
 			// Use caller environment for database operations (contains Supabase configuration)
-			let creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, pagesRequired, callerEnvObj, this.logger);
+			let creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, creditsRequired, callerEnvObj, this.logger);
 			
 			// If user has no active subscriptions, try to create a freemium subscription
 			if (!creditCheck.hasCredits && creditCheck.error === 'No active subscriptions found' && userId) {
@@ -298,7 +311,7 @@ export default class extends WorkerEntrypoint {
 						});
 						
 						// Re-check credits after creating freemium subscription
-						creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, pagesRequired, callerEnvObj, this.logger);
+						creditCheck = await FaxDatabaseUtils.checkUserCredits(userId, creditsRequired, callerEnvObj, this.logger);
 					} else {
 						this.logger.log('INFO', 'Freemium subscription not created (user may already have subscriptions)', {
 							userId: userId
@@ -315,7 +328,9 @@ export default class extends WorkerEntrypoint {
 			if (!creditCheck.hasCredits) {
 				this.logger.log('WARN', 'Insufficient credits for fax', {
 					userId: userId,
-					pagesRequired: pagesRequired,
+					pages: totalPages,
+					creditPerPage: creditPerPage,
+					creditsRequired: creditsRequired,
 					availablePages: creditCheck.availablePages,
 					error: creditCheck.error
 				});
@@ -328,9 +343,10 @@ export default class extends WorkerEntrypoint {
 				let errorTitle = "Insufficient credits";
 				
 				if (isFreemiumUser) {
-					if (pagesRequired > 5) {
+					// For freemium users, check pages (not credits) since they have a page limit
+					if (totalPages > 5) {
 						errorTitle = "Page limit exceeded";
-						errorMessage = `Your free plan allows up to 5 pages per month. You're trying to send ${pagesRequired} pages. Please upgrade to a paid plan for higher limits.`;
+						errorMessage = `Your free plan allows up to 5 pages per month. You're trying to send ${totalPages} pages. Please upgrade to a paid plan for higher limits.`;
 					} else {
 						errorTitle = "Monthly limit reached";
 						errorMessage = `You've used all 5 free pages for this month. Your limit will reset in 30 days from when you signed up, or upgrade to a paid plan for more pages.`;
@@ -342,7 +358,9 @@ export default class extends WorkerEntrypoint {
 					error: errorTitle,
 					message: errorMessage,
 					data: {
-						pagesRequired: pagesRequired,
+						pages: totalPages,
+						creditPerPage: creditPerPage,
+						creditsRequired: creditsRequired,
 						availablePages: creditCheck.availablePages,
 						subscriptionId: creditCheck.subscriptionId,
 						isFreemiumUser: isFreemiumUser,
@@ -354,7 +372,9 @@ export default class extends WorkerEntrypoint {
 			
 			this.logger.log('INFO', 'Credit check passed', {
 				userId: userId,
-				pagesRequired: pagesRequired,
+				pages: totalPages,
+				creditPerPage: creditPerPage,
+				creditsRequired: creditsRequired,
 				availablePages: creditCheck.availablePages,
 				subscriptionId: creditCheck.subscriptionId
 			});
@@ -382,12 +402,14 @@ export default class extends WorkerEntrypoint {
 				apiProvider: faxProvider.getProviderName()
 			});
 
-			// Note: Page usage is NOT updated here - it will be updated when the fax is actually delivered
+			// Note: Credit usage is NOT updated here - it will be updated when the fax is actually delivered
 			// via webhook handlers. This ensures failed faxes don't count against user's quota.
 			this.logger.log('INFO', 'Fax submitted - usage will be recorded when delivered via webhook', {
 				userId: userId,
 				subscriptionId: creditCheck.subscriptionId,
-				pagesRequired: pagesRequired
+				pages: totalPages,
+				creditPerPage: creditPerPage,
+				creditsRequired: creditsRequired
 			});
 
 			return {
@@ -403,10 +425,13 @@ export default class extends WorkerEntrypoint {
 					recipient: faxRequest.recipients?.[0] || 'unknown',
 					pages: totalPages,
 					document_count: documentCount,
+					creditPerPage: creditPerPage,
+					creditsRequired: creditsRequired,
+					creditsUsed: creditsRequired,
+					rateInfo: rateInfo,
 					cost: null,
 					apiProvider: faxProvider.getProviderName(),
-					providerResponse: faxResult.providerResponse,
-					credits: 1
+					providerResponse: faxResult.providerResponse
 				}
 			};
 
@@ -1771,16 +1796,15 @@ export default class extends WorkerEntrypoint {
 					statusCode: 404,
 					error: 'No rate match found',
 					message: 'No matching rate found for this number',
-					data: {
-						input: to,
-						phone_e164: phoneE164,
-						dialed_digits: dialedDigits,
-						lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
-						debug: {
-							lrn_match: rateCalculation.lrnMatch,
-							dialed_match: rateCalculation.dialedMatch,
-							portability: lookupData?.portability || null,
-						}
+					input: to,
+					phone_e164: phoneE164,
+					dialed_digits: dialedDigits,
+					lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
+					credit_per_page: null,
+					debug: {
+						lrn_match: rateCalculation.lrnMatch,
+						dialed_match: rateCalculation.dialedMatch,
+						portability: lookupData?.portability || null,
 					}
 				};
 			}
@@ -1788,17 +1812,16 @@ export default class extends WorkerEntrypoint {
 			return {
 				statusCode: 200,
 				message: 'Number lookup successful',
-				data: {
-					input: to,
-					phone_e164: phoneE164,
-					dialed_digits: dialedDigits,
-					lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
-					billed_rate: rateCalculation.billed,
-					debug: {
-						lrn_match: rateCalculation.lrnMatch,
-						dialed_match: rateCalculation.dialedMatch,
-						portability: lookupData?.portability || null,
-					}
+				input: to,
+				phone_e164: phoneE164,
+				dialed_digits: dialedDigits,
+				lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
+				billed_rate: rateCalculation.billed,
+				credit_per_page: rateCalculation.creditPerPage,
+				debug: {
+					lrn_match: rateCalculation.lrnMatch,
+					dialed_match: rateCalculation.dialedMatch,
+					portability: lookupData?.portability || null,
 				}
 			};
 
@@ -1814,6 +1837,107 @@ export default class extends WorkerEntrypoint {
 				message: error.message
 			};
 		}
+	}
+
+	/**
+	 * Calculate total credits required for a fax
+	 * @param {string} destinationNumber - Recipient phone number
+	 * @param {number} pageCount - Number of pages in the fax
+	 * @param {Object} callerEnvObj - Environment variables
+	 * @param {Request} request - Original request for cache API access
+	 * @returns {Promise<Object>} Credit calculation result with creditPerPage, creditsRequired, and rateInfo
+	 */
+	async calculateFaxCredits(destinationNumber, pageCount, callerEnvObj, request) {
+		const DEFAULT_CREDIT_PER_PAGE = 1;
+		
+		let creditPerPage = DEFAULT_CREDIT_PER_PAGE;
+		let rateInfo = null;
+		
+		if (!destinationNumber || !callerEnvObj.TELNYX_API_KEY) {
+			this.logger.log('DEBUG', 'Skipping rate lookup - no destination number or Telnyx API key', {
+				hasDestination: !!destinationNumber,
+				hasApiKey: !!callerEnvObj.TELNYX_API_KEY
+			});
+			return {
+				creditPerPage: DEFAULT_CREDIT_PER_PAGE,
+				creditsRequired: DEFAULT_CREDIT_PER_PAGE * pageCount,
+				rateInfo: null
+			};
+		}
+		
+		try {
+			const dialedDigits = digitsOnly(destinationNumber);
+			if (!dialedDigits) {
+				this.logger.log('WARN', 'Could not extract digits from destination number', {
+					destinationNumber
+				});
+				return {
+					creditPerPage: DEFAULT_CREDIT_PER_PAGE,
+					creditsRequired: DEFAULT_CREDIT_PER_PAGE * pageCount,
+					rateInfo: null
+				};
+			}
+			
+			const phoneE164 = destinationNumber.startsWith("+") ? destinationNumber : `+${dialedDigits}`;
+			
+			// Perform Telnyx lookup to get rate
+			const lookupData = await this.performTelnyxLookup(
+				phoneE164,
+				callerEnvObj,
+				request
+			);
+			
+			if (!lookupData) {
+				this.logger.log('WARN', 'Rate lookup returned no data, using default credit per page', {
+					destinationNumber
+				});
+				return {
+					creditPerPage: DEFAULT_CREDIT_PER_PAGE,
+					creditsRequired: DEFAULT_CREDIT_PER_PAGE * pageCount,
+					rateInfo: null
+				};
+			}
+			
+			// Get rate tables and calculate rate
+			const rateTables = getRateTables(callerEnvObj);
+			const prefixes = rateTables.prefixes || [];
+			const rates = rateTables.rates || [];
+			
+			const rateCalculation = calculateRate(lookupData, dialedDigits, prefixes, rates);
+			
+			if (rateCalculation.billed && rateCalculation.creditPerPage !== null) {
+				creditPerPage = rateCalculation.creditPerPage;
+				rateInfo = {
+					rate_usd_per_min: rateCalculation.billed.rate_usd_per_min,
+					prefix: rateCalculation.billed.prefix,
+					lrn_prefix_used: rateCalculation.lrnPrefix
+				};
+				this.logger.log('INFO', 'Rate lookup successful for fax', {
+					destinationNumber,
+					creditPerPage: creditPerPage,
+					rate: rateCalculation.billed.rate_usd_per_min
+				});
+			} else {
+				this.logger.log('WARN', 'Rate calculation failed, using default credit per page', {
+					destinationNumber
+				});
+			}
+		} catch (error) {
+			// Log error but continue with default credit per page
+			this.logger.log('WARN', 'Error during rate lookup for fax, using default credit', {
+				destinationNumber,
+				error: error.message
+			});
+		}
+		
+		// Calculate total credits required and ceil to integer
+		const creditsRequired = Math.ceil(creditPerPage) * pageCount;
+		
+		return {
+			creditPerPage,
+			creditsRequired,
+			rateInfo
+		};
 	}
 
 	/**
