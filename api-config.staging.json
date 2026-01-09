@@ -98,6 +98,16 @@
         },
         {
             "method": "GET",
+            "path": "/v1/fax/lookup",
+            "integration": {
+                "type": "service_binding",
+                "binding": "fax_service",
+                "function": "numberLookup"
+            },
+            "auth": false
+        },
+        {
+            "method": "GET",
             "path": "/v1/env-test/debug",
             "integration": {
                 "type": "service_binding",

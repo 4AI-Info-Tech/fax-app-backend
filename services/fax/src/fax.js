@@ -9,6 +9,7 @@ import { NotifyreProvider } from './providers/notifyre-provider.js';
 import { TelnyxProvider } from './providers/telnyx-provider.js';
 import { R2Utils } from './r2-utils.js';
 import { NotificationService } from './notifications.js';
+import { digitsOnly, calculateRate, getRateTables } from './rates.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -1697,4 +1698,244 @@ export default class extends WorkerEntrypoint {
 			// Don't throw error - we don't want Slack notification failures to break fax processing
 		}
 	}
+
+	/**
+	 * Number lookup endpoint for pricing
+	 * Performs Telnyx lookup, extracts LRN, and determines pricing using LRN-first logic
+	 * @param {Request} request - The HTTP request
+	 * @param {Object} caller_env - Environment variables
+	 * @param {Object} sagContext - Serverless API Gateway context
+	 * @returns {Promise<Object>} Response object with pricing information
+	 */
+	async numberLookup(request, caller_env = "{}", sagContext = "{}") {
+		try {
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+			
+			this.logger.log('INFO', 'Number lookup request received');
+
+			const url = new URL(request.url);
+			const to = url.searchParams.get('to') || '';
+			
+			if (!to) {
+				return {
+					statusCode: 400,
+					error: 'Missing parameter',
+					message: "Missing 'to' parameter. Use /v1/fax/lookup?to=1-330-341-7001"
+				};
+			}
+
+			const dialedDigits = digitsOnly(to);
+			if (!dialedDigits) {
+				return {
+					statusCode: 400,
+					error: 'Invalid phone number',
+					message: "Invalid 'to' parameter. Could not extract digits."
+				};
+			}
+
+			const phoneE164 = to.startsWith("+") ? to : `+${dialedDigits}`;
+
+			// Check if Telnyx API key is available
+			if (!callerEnvObj.TELNYX_API_KEY) {
+				return {
+					statusCode: 500,
+					error: 'Configuration error',
+					message: 'TELNYX_API_KEY not configured'
+				};
+			}
+
+			// Perform Telnyx lookup with caching
+			const lookupData = await this.performTelnyxLookup(
+				phoneE164,
+				callerEnvObj,
+				request
+			);
+
+			if (!lookupData) {
+				return {
+					statusCode: 500,
+					error: 'Lookup failed',
+					message: 'Failed to perform Telnyx number lookup'
+				};
+			}
+
+			// Get rate tables and calculate rate
+			const rateTables = getRateTables(callerEnvObj);
+			const prefixes = rateTables.prefixes || [];
+			const rates = rateTables.rates || [];
+
+			const rateCalculation = calculateRate(lookupData, dialedDigits, prefixes, rates);
+
+			if (!rateCalculation.billed) {
+				return {
+					statusCode: 404,
+					error: 'No rate match found',
+					message: 'No matching rate found for this number',
+					data: {
+						input: to,
+						phone_e164: phoneE164,
+						dialed_digits: dialedDigits,
+						lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
+						debug: {
+							lrn_match: rateCalculation.lrnMatch,
+							dialed_match: rateCalculation.dialedMatch,
+							portability: lookupData?.portability || null,
+						}
+					}
+				};
+			}
+
+			return {
+				statusCode: 200,
+				message: 'Number lookup successful',
+				data: {
+					input: to,
+					phone_e164: phoneE164,
+					dialed_digits: dialedDigits,
+					lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
+					billed_rate: rateCalculation.billed,
+					debug: {
+						lrn_match: rateCalculation.lrnMatch,
+						dialed_match: rateCalculation.dialedMatch,
+						portability: lookupData?.portability || null,
+					}
+				}
+			};
+
+		} catch (error) {
+			this.logger.log('ERROR', 'Error in numberLookup', {
+				error: error.message,
+				stack: error.stack
+			});
+
+			return {
+				statusCode: 500,
+				error: 'Number lookup failed',
+				message: error.message
+			};
+		}
+	}
+
+	/**
+	 * Perform Telnyx number lookup with caching
+	 * @param {string} phoneE164 - Phone number in E.164 format
+	 * @param {Object} callerEnvObj - Environment variables
+	 * @param {Request} request - Original request for cache API access
+	 * @returns {Promise<Object|null>} Lookup data or null if failed
+	 */
+	async performTelnyxLookup(phoneE164, callerEnvObj, request) {
+		const TELNYX_BASE = "https://api.telnyx.com/v2/number_lookup/";
+		const ttl = Number(callerEnvObj.LOOKUP_TTL_SECONDS || 86400); // Default 24 hours
+		
+		// Generate cache key
+		const dialedDigits = digitsOnly(phoneE164);
+		const typesKey = ''; // Empty for basic lookup
+		const cacheKey = `https://lookup.local/number/${dialedDigits}?types=${typesKey}`;
+		const kvKey = `lookup:${dialedDigits}:types:${typesKey}`;
+
+		// Try to get from cache
+		const cache = caches.default;
+		let lookupData = await this.getCachedLookup(callerEnvObj, cache, cacheKey, kvKey);
+
+		if (lookupData) {
+			this.logger.log('DEBUG', 'Number lookup cache hit', { phoneE164 });
+			return lookupData;
+		}
+
+		// Perform Telnyx lookup
+		this.logger.log('DEBUG', 'Performing Telnyx number lookup', { phoneE164 });
+		
+		const url = new URL(TELNYX_BASE + encodeURIComponent(phoneE164));
+		// Don't request carrier/cnam by default to keep lookup cheap
+		// Add types if needed: url.searchParams.append("type", "carrier");
+
+		const response = await fetch(url.toString(), {
+			headers: { Authorization: `Bearer ${callerEnvObj.TELNYX_API_KEY}` },
+		});
+
+		if (!response.ok) {
+			this.logger.log('ERROR', 'Telnyx lookup failed', {
+				status: response.status,
+				statusText: response.statusText,
+				phoneE164
+			});
+			throw new Error(`Telnyx lookup failed: ${response.status}`);
+		}
+
+		const json = await response.json();
+		lookupData = json?.data ?? null;
+
+		if (lookupData) {
+			// Cache the result
+			await this.putCachedLookup(callerEnvObj, request, cache, cacheKey, kvKey, ttl, lookupData);
+			this.logger.log('DEBUG', 'Number lookup cached', { phoneE164 });
+		}
+
+		return lookupData;
+	}
+
+	/**
+	 * Get cached lookup data
+	 * @param {Object} callerEnvObj - Environment variables
+	 * @param {Cache} cache - Cache API instance
+	 * @param {string} cacheKey - Cache API key
+	 * @param {string} kvKey - KV namespace key (if available)
+	 * @returns {Promise<Object|null>} Cached data or null
+	 */
+	async getCachedLookup(callerEnvObj, cache, cacheKey, kvKey) {
+		// Try KV first if available
+		if (this.env.LOOKUP_KV) {
+			try {
+				const v = await this.env.LOOKUP_KV.get(kvKey, "json");
+				if (v) return v;
+			} catch (error) {
+				this.logger.log('DEBUG', 'KV lookup failed, trying cache API', { error: error.message });
+			}
+		}
+
+		// Try Cache API
+		try {
+			const r = await cache.match(cacheKey);
+			return r ? await r.json() : null;
+		} catch (error) {
+			this.logger.log('DEBUG', 'Cache API lookup failed', { error: error.message });
+			return null;
+		}
+	}
+
+	/**
+	 * Store lookup data in cache
+	 * @param {Object} callerEnvObj - Environment variables
+	 * @param {Request} request - Original request
+	 * @param {Cache} cache - Cache API instance
+	 * @param {string} cacheKey - Cache API key
+	 * @param {string} kvKey - KV namespace key (if available)
+	 * @param {number} ttl - Time to live in seconds
+	 * @param {Object} data - Data to cache
+	 */
+	async putCachedLookup(callerEnvObj, request, cache, cacheKey, kvKey, ttl, data) {
+		// Store in KV if available
+		if (this.env.LOOKUP_KV) {
+			try {
+				await this.env.LOOKUP_KV.put(kvKey, JSON.stringify(data), { expirationTtl: ttl });
+			} catch (error) {
+				this.logger.log('DEBUG', 'KV cache put failed', { error: error.message });
+			}
+		}
+
+		// Store in Cache API
+		try {
+			const response = new Response(JSON.stringify(data), {
+				headers: {
+					"content-type": "application/json; charset=utf-8",
+					"cache-control": `public, max-age=${ttl}`,
+				},
+			});
+
+			await cache.put(cacheKey, response);
+		} catch (error) {
+			this.logger.log('DEBUG', 'Cache API put failed', { error: error.message });
+		}
+	}
+
 }
