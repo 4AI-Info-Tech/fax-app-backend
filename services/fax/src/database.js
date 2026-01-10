@@ -46,7 +46,7 @@ export class DatabaseUtils {
 				subject: faxData.subject || null,
 				pages: faxData.pages || 0,
 				document_count: faxData.document_count || 1,
-				cost: faxData.cost || null,
+				cost: faxData.cost !== undefined && faxData.cost !== null ? Math.ceil(faxData.cost) : 0,
 				client_reference: faxData.clientReference || 'SendFaxPro',
 				sent_at: faxData.sentAt || new Date().toISOString(),
 				completed_at: faxData.completedAt || null,

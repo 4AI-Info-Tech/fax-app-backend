@@ -383,12 +383,12 @@ export default class extends WorkerEntrypoint {
 
 			if (faxProvider.getProviderName() === 'telnyx') {
 				this.logger.log('INFO', 'Using Telnyx custom workflow');
-				faxResult = await faxProvider.sendFaxWithCustomWorkflow(faxRequest, userId);
+				faxResult = await faxProvider.sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired);
 			} else {
 				this.logger.log('INFO', 'Using standard provider workflow');
 				const providerPayload = await faxProvider.buildPayload(faxRequest);
 				faxResult = await faxProvider.sendFax(providerPayload);
-				await this.saveFaxRecordForStandardWorkflow(faxResult, faxRequest, userId, faxProvider.getProviderName(), callerEnvObj);
+				await this.saveFaxRecordForStandardWorkflow(faxResult, faxRequest, userId, faxProvider.getProviderName(), callerEnvObj, creditsRequired);
 			}
 
 			if (!faxResult.id) {
@@ -617,11 +617,12 @@ export default class extends WorkerEntrypoint {
 		}
 	}
 
-	async saveFaxRecordForStandardWorkflow(faxResult, faxRequest, userId, providerName, callerEnvObj) {
+	async saveFaxRecordForStandardWorkflow(faxResult, faxRequest, userId, providerName, callerEnvObj, creditsRequired = 0) {
 		try {
 			this.logger.log('DEBUG', 'Saving fax record for standard workflow', {
 				userId: userId || 'anonymous',
-				providerName
+				providerName,
+				creditsRequired
 			});
 
 			// Calculate document count and total pages from files
@@ -637,7 +638,7 @@ export default class extends WorkerEntrypoint {
 				subject: faxRequest.subject || faxRequest.message,
 				pages: totalPages,
 				document_count: documentCount,
-				cost: null,
+				cost: Math.ceil(creditsRequired) || 0,
 				clientReference: faxRequest.clientReference || 'SendFaxPro',
 				sentAt: new Date().toISOString(),
 				completedAt: null,
@@ -764,9 +765,13 @@ export default class extends WorkerEntrypoint {
 
 			// Record usage if fax was successfully delivered
 			if (standardizedStatus === 'delivered' && updatedFaxRecord && updatedFaxRecord.user_id) {
+				// Use cost from fax record (credit cost), fallback to pageCount if cost is not available
+				const creditsToDeduct = updatedFaxRecord.cost !== undefined && updatedFaxRecord.cost !== null 
+					? Math.ceil(updatedFaxRecord.cost) 
+					: (pageCount || updatedFaxRecord.pages || 1);
 				const finalPageCount = pageCount || updatedFaxRecord.pages || 1;
 				
-				// Record usage in analytics table
+				// Record usage in analytics table (using page count for analytics)
 				await DatabaseUtils.recordUsage({
 					userId: updatedFaxRecord.user_id,
 					type: 'fax',
@@ -777,11 +782,12 @@ export default class extends WorkerEntrypoint {
 						fax_id: telnyxFaxId,
 						provider: 'telnyx',
 						event_type: eventType,
-						status: standardizedStatus
+						status: standardizedStatus,
+						credits_deducted: creditsToDeduct
 					}
 				}, callerEnvObj, this.logger);
 				
-				// Update subscription's credits_used field
+				// Update subscription's credits_used field (using actual credit cost)
 				try {
 					// Find the user's active subscription to update
 					const { createClient } = await import('@supabase/supabase-js');
@@ -804,7 +810,7 @@ export default class extends WorkerEntrypoint {
 					if (!subError && subscriptions && subscriptions.length > 0) {
 						// Update the first (most recent) active subscription
 						const subscription = subscriptions[0];
-						const newCreditsUsed = (subscription.credits_used || 0) + finalPageCount;
+						const newCreditsUsed = (subscription.credits_used || 0) + creditsToDeduct;
 						
 						const { error: updateError } = await supabase
 							.from('user_subscriptions')
@@ -818,14 +824,15 @@ export default class extends WorkerEntrypoint {
 							this.logger.log('ERROR', 'Failed to update subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								creditsUsed: finalPageCount,
+								creditsUsed: creditsToDeduct,
 								error: updateError.message
 							});
 						} else {
-							this.logger.log('INFO', 'Updated subscription credits_used in webhook', {
+							this.logger.log('INFO', 'Added used credits to subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								creditsUsed: finalPageCount,
+								creditsAdded: creditsToDeduct,
+								previousCreditsUsed: subscription.credits_used || 0,
 								newCreditsUsed: newCreditsUsed
 							});
 						}
@@ -949,9 +956,13 @@ export default class extends WorkerEntrypoint {
 
 			// Record usage if fax was successfully delivered
 			if (standardizedStatus === 'delivered' && updatedFaxRecord && updatedFaxRecord.user_id) {
+				// Use cost from fax record (credit cost), fallback to pageCount if cost is not available
+				const creditsToDeduct = updatedFaxRecord.cost !== undefined && updatedFaxRecord.cost !== null 
+					? Math.ceil(updatedFaxRecord.cost) 
+					: (pageCount || updatedFaxRecord.pages || 1);
 				const finalPageCount = pageCount || updatedFaxRecord.pages || 1;
 				
-				// Record usage in analytics table
+				// Record usage in analytics table (using page count for analytics)
 				await DatabaseUtils.recordUsage({
 					userId: updatedFaxRecord.user_id,
 					type: 'fax',
@@ -962,11 +973,12 @@ export default class extends WorkerEntrypoint {
 						fax_id: notifyreFaxId,
 						provider: 'notifyre',
 						event_type: eventType,
-						status: standardizedStatus
+						status: standardizedStatus,
+						credits_deducted: creditsToDeduct
 					}
 				}, callerEnvObj, this.logger);
 				
-				// Update subscription's credits_used field
+				// Update subscription's credits_used field (using actual credit cost)
 				try {
 					// Find the user's active subscription to update
 					const { createClient } = await import('@supabase/supabase-js');
@@ -989,7 +1001,7 @@ export default class extends WorkerEntrypoint {
 					if (!subError && subscriptions && subscriptions.length > 0) {
 						// Update the first (most recent) active subscription
 						const subscription = subscriptions[0];
-						const newCreditsUsed = (subscription.credits_used || 0) + finalPageCount;
+						const newCreditsUsed = (subscription.credits_used || 0) + creditsToDeduct;
 						
 						const { error: updateError } = await supabase
 							.from('user_subscriptions')
@@ -1003,14 +1015,15 @@ export default class extends WorkerEntrypoint {
 							this.logger.log('ERROR', 'Failed to update subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								creditsUsed: finalPageCount,
+								creditsUsed: creditsToDeduct,
 								error: updateError.message
 							});
 						} else {
-							this.logger.log('INFO', 'Updated subscription credits_used in webhook', {
+							this.logger.log('INFO', 'Added used credits to subscription credits_used in webhook', {
 								userId: updatedFaxRecord.user_id,
 								subscriptionId: subscription.id,
-								creditsUsed: finalPageCount,
+								creditsAdded: creditsToDeduct,
+								previousCreditsUsed: subscription.credits_used || 0,
 								newCreditsUsed: newCreditsUsed
 							});
 						}

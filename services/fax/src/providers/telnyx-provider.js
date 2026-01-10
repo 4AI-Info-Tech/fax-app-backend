@@ -160,12 +160,12 @@ export class TelnyxProvider {
 	 * @param {string|null} userId - User ID from auth context
 	 * @returns {object} Standardized response
 	 */
-	async sendFaxWithCustomWorkflow(faxRequest, userId) {
+	async sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired = 0) {
 		try {
 			this.logger.log('INFO', 'Starting Telnyx custom workflow: Save to Supabase → Upload to R2 → Send fax');
 
 			// Step 1: Create initial fax record in Supabase
-			const faxRecord = await this.createInitialFaxRecord(faxRequest, userId);
+			const faxRecord = await this.createInitialFaxRecord(faxRequest, userId, creditsRequired);
 			this.logger.log('INFO', 'Step 1 complete: Fax record saved to Supabase', { faxId: faxRecord.id });
 
 			// Step 2: Upload files to R2 and get public URLs
@@ -199,9 +199,10 @@ export class TelnyxProvider {
 	 * Create initial fax record in Supabase
 	 * @param {object} faxRequest - Standardized fax request
 	 * @param {string|null} userId - User ID
+	 * @param {number} creditsRequired - Credit cost for this fax
 	 * @returns {object} Created fax record
 	 */
-	async createInitialFaxRecord(faxRequest, userId) {
+	async createInitialFaxRecord(faxRequest, userId, creditsRequired = 0) {
 		// Calculate document count and total pages from files
 		const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
 		const totalPages = faxRequest.files?._totalPages || 1;
@@ -216,6 +217,7 @@ export class TelnyxProvider {
 			original_status: 'preparing',
 			pages: totalPages,
 			document_count: documentCount,
+			cost: Math.ceil(creditsRequired) || 0,
 			created_at: new Date().toISOString()
 		};
 
