@@ -558,6 +558,23 @@ export class DatabaseUtils {
 				return null;
 			}
 
+			// Determine if this is an annual subscription (for monthly credit resets)
+			// Annual subscriptions typically have "annual" in the product_id
+			const isAnnualSubscription = productId.toLowerCase().includes('annual') || 
+				productId.toLowerCase().includes('yearly') ||
+				productId.toLowerCase().includes('year');
+			
+			// Calculate initial billing period for annual subscriptions with monthly limits
+			let billingPeriodStart = null;
+			let billingPeriodEnd = null;
+			if (isAnnualSubscription) {
+				const purchaseDate = new Date(purchasedAt);
+				// Start from purchase date
+				billingPeriodStart = new Date(purchaseDate.getFullYear(), purchaseDate.getMonth(), purchaseDate.getDate());
+				// End at start of next month (first day of next month)
+				billingPeriodEnd = new Date(purchaseDate.getFullYear(), purchaseDate.getMonth() + 1, 1);
+			}
+
 			// For subscription type, we need to handle the unique constraint at application level
 			// since PostgreSQL doesn't support subqueries in index predicates
 			if (product.type === 'subscription') {
@@ -584,16 +601,23 @@ export class DatabaseUtils {
 
 				if (existingSubscription) {
 					// Update existing subscription
+					// For annual subscriptions, reset billing period if it's a renewal
 					const updateData = {
 						product_id: productId,
 						subscription_id: subscriptionId,
 						entitlement_id: entitlementId,
 						purchased_at: purchasedAt,
 						expires_at: expiresAt,
-					credit_limit: creditLimit || 0,
-					credits_used: 0, // Reset credits used for new subscription
+						credit_limit: creditLimit || 0,
+						credits_used: 0, // Reset credits used for new subscription
 						updated_at: new Date().toISOString()
 					};
+
+					// Update billing period for annual subscriptions
+					if (isAnnualSubscription && billingPeriodStart && billingPeriodEnd) {
+						updateData.billing_period_start = billingPeriodStart.toISOString().split('T')[0];
+						updateData.billing_period_end = billingPeriodEnd.toISOString().split('T')[0];
+					}
 
 					const { data: updatedSubscription, error: updateError } = await supabase
 						.from('user_subscriptions')
@@ -633,6 +657,12 @@ export class DatabaseUtils {
 				credits_used: 0,
 				is_active: true
 			};
+
+			// Set billing period for annual subscriptions
+			if (isAnnualSubscription && billingPeriodStart && billingPeriodEnd) {
+				newSubscriptionData.billing_period_start = billingPeriodStart.toISOString().split('T')[0];
+				newSubscriptionData.billing_period_end = billingPeriodEnd.toISOString().split('T')[0];
+			}
 
 			const { data: newSubscription, error: insertError } = await supabase
 				.from('user_subscriptions')

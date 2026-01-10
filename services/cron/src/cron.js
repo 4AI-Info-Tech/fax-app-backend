@@ -29,6 +29,9 @@ export default {
 				// Every minute - fetch faxes from last 12 hours and update Supabase
 				// Note: Consider changing to "* * * * *" (every minute) to avoid rate limiting
 				await handleFaxStatusPolling(env, logger);
+			} else if (cronExpression === '0 0 * * *') {
+				// Daily at midnight - reset monthly credits for annual subscriptions
+				await handleMonthlyCreditReset(env, logger);
 			} else {
 				logger.log('WARN', 'Unknown cron schedule', { cronExpression });
 			}
@@ -85,6 +88,18 @@ export default {
 				await handleDailyCleanup(env, logger);
 				return new Response(JSON.stringify({
 					message: 'Cleanup completed',
+					timestamp: new Date().toISOString()
+				}), {
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+
+			if (url.pathname === '/trigger/reset-monthly-credits') {
+				// Manual trigger for monthly credit reset
+				logger.log('INFO', 'Manual monthly credit reset trigger received');
+				await handleMonthlyCreditReset(env, logger);
+				return new Response(JSON.stringify({
+					message: 'Monthly credit reset completed',
 					timestamp: new Date().toISOString()
 				}), {
 					headers: { 'Content-Type': 'application/json' }
@@ -228,3 +243,126 @@ async function handleDailyCleanup(env, logger) {
 	}
 }
 
+/**
+ * Handle monthly credit reset for annual subscriptions
+ * Resets credits_used to 0 and updates billing period for annual subscriptions
+ * that have passed their billing_period_end date
+ * @param {object} env - Environment variables
+ * @param {Logger} logger - Logger instance
+ */
+async function handleMonthlyCreditReset(env, logger) {
+	logger.log('INFO', 'Starting monthly credit reset for annual subscriptions');
+
+	try {
+		if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+			logger.log('ERROR', 'Supabase not configured for monthly credit reset');
+			return;
+		}
+
+		const { createClient } = await import('@supabase/supabase-js');
+		const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+			auth: {
+				autoRefreshToken: false,
+				persistSession: false
+			}
+		});
+
+		const now = new Date();
+		const today = now.toISOString().split('T')[0]; // YYYY-MM-DD format
+
+		// Find annual subscriptions with expired billing periods
+		// Annual subscriptions typically have "annual", "yearly", or "year" in product_id
+		const { data: expiredBillingPeriods, error: fetchError } = await supabase
+			.from('user_subscriptions')
+			.select(`
+				id,
+				user_id,
+				product_id,
+				credit_limit,
+				billing_period_start,
+				billing_period_end,
+				products!inner(product_id)
+			`)
+			.eq('is_active', true)
+			.not('billing_period_end', 'is', null)
+			.lte('billing_period_end', today)
+			.or('product_id.ilike.%annual%,product_id.ilike.%yearly%,product_id.ilike.%year%');
+
+		if (fetchError) {
+			logger.log('ERROR', 'Failed to fetch subscriptions for monthly reset', {
+				error: fetchError.message
+			});
+			return;
+		}
+
+		if (!expiredBillingPeriods || expiredBillingPeriods.length === 0) {
+			logger.log('INFO', 'No annual subscriptions found with expired billing periods');
+			return;
+		}
+
+		logger.log('INFO', 'Found annual subscriptions with expired billing periods', {
+			count: expiredBillingPeriods.length
+		});
+
+		let resetCount = 0;
+		let errorCount = 0;
+
+		// Reset each subscription's credits and update billing period
+		for (const subscription of expiredBillingPeriods) {
+			try {
+				const oldPeriodEnd = new Date(subscription.billing_period_end);
+				const newPeriodStart = new Date(oldPeriodEnd);
+				newPeriodStart.setDate(newPeriodStart.getDate() + 1); // Start of next month
+				
+				const newPeriodEnd = new Date(newPeriodStart);
+				newPeriodEnd.setMonth(newPeriodEnd.getMonth() + 1); // End of next month
+
+				// Call the database function to reset credits
+				const { data: resetResult, error: resetError } = await supabase
+					.rpc('reset_subscription_credits', {
+						p_user_id: subscription.user_id,
+						p_new_credit_limit: subscription.credit_limit,
+						p_billing_start: newPeriodStart.toISOString().split('T')[0],
+						p_billing_end: newPeriodEnd.toISOString().split('T')[0]
+					});
+
+				if (resetError) {
+					logger.log('ERROR', 'Failed to reset subscription credits', {
+						subscriptionId: subscription.id,
+						userId: subscription.user_id,
+						error: resetError.message
+					});
+					errorCount++;
+				} else if (resetResult) {
+					resetCount++;
+					logger.log('INFO', 'Reset monthly credits for annual subscription', {
+						subscriptionId: subscription.id,
+						userId: subscription.user_id,
+						productId: subscription.product_id,
+						creditLimit: subscription.credit_limit,
+						newPeriodStart: newPeriodStart.toISOString().split('T')[0],
+						newPeriodEnd: newPeriodEnd.toISOString().split('T')[0]
+					});
+				}
+			} catch (error) {
+				logger.log('ERROR', 'Error resetting subscription credits', {
+					subscriptionId: subscription.id,
+					error: error.message
+				});
+				errorCount++;
+			}
+		}
+
+		logger.log('INFO', 'Monthly credit reset completed', {
+			totalFound: expiredBillingPeriods.length,
+			resetCount,
+			errorCount
+		});
+
+	} catch (error) {
+		logger.log('ERROR', 'Error in monthly credit reset', {
+			error: error.message,
+			stack: error.stack
+		});
+	}
+}

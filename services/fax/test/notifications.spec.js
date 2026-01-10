@@ -279,6 +279,17 @@ describe('NotificationService', () => {
                 recipientNumber: '+1234567890'
             };
 
+            // Setup mock response with proper headers
+            const mockHeaders = new Headers();
+            mockHeaders.set('content-type', 'application/json');
+            global.fetch.mockResolvedValue({
+                ok: true,
+                status: 200,
+                statusText: 'OK',
+                headers: mockHeaders,
+                json: () => Promise.resolve({ id: 'notification-123', recipients: 1 })
+            });
+
             const result = await notificationService.sendPushNotification(mockEnv, userId, notification);
 
             expect(result.success).toBe(true);
@@ -305,11 +316,13 @@ describe('NotificationService', () => {
         });
 
         it('should handle OneSignal API errors gracefully', async () => {
+            const mockHeaders = new Headers();
+            mockHeaders.set('content-type', 'application/json');
             global.fetch.mockResolvedValue({
                 ok: false,
                 status: 400,
                 statusText: 'Bad Request',
-                headers: new Headers(),
+                headers: mockHeaders,
                 json: () => Promise.resolve({ errors: ['Invalid player id'] })
             });
 

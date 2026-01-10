@@ -77,10 +77,25 @@ export class NotificationService {
                 return { success: false, error: 'Notification object not provided' };
             }
 
+            // Ensure userId is a string (convert UUID if needed)
+            const userIdString = typeof userId === 'string' ? userId : String(userId);
+            
+            // Validate userId format (should be a UUID string for production)
+            // Warn if not UUID format, but allow it to proceed (OneSignal will handle validation)
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!uuidRegex.test(userIdString)) {
+                this.logger.log('WARN', 'User ID does not match UUID format - OneSignal may reject if external_user_id not set', {
+                    userId: userIdString,
+                    faxId: notification?.faxId,
+                    note: 'This may be expected in test environments'
+                });
+                // Don't block - let OneSignal handle validation
+            }
+
             // Build the notification payload
             const payload = {
                 app_id: env.ONESIGNAL_APP_ID,
-                include_external_user_ids: [userId],
+                include_external_user_ids: [userIdString],
                 contents: { en: notification.message },
                 headings: { en: notification.title },
                 data: {
@@ -94,7 +109,7 @@ export class NotificationService {
             };
 
             this.logger.log('DEBUG', 'Built OneSignal payload', {
-                userId,
+                userId: userIdString,
                 faxId: notification.faxId,
                 status: notification.status,
                 payloadSize: JSON.stringify(payload).length,
@@ -108,18 +123,32 @@ export class NotificationService {
             });
 
             this.logger.log('DEBUG', 'Sending push notification via OneSignal', {
-                userId,
+                userId: userIdString,
                 faxId: notification.faxId,
                 status: notification.status,
                 apiUrl: this.oneSignalApiUrl,
                 timestamp: new Date().toISOString()
             });
 
+            // OneSignal REST API v1 uses Basic auth
+            // Format: Authorization: Basic <REST_API_KEY>
+            // Note: OneSignal accepts the REST API Key directly (some implementations base64 encode it)
+            // We'll use the key directly as per OneSignal's common practice
+            const authHeader = `Basic ${env.ONESIGNAL_REST_API_KEY}`;
+            
+            this.logger.log('DEBUG', 'Prepared OneSignal API request', {
+                userId: userIdString,
+                faxId: notification.faxId,
+                apiUrl: this.oneSignalApiUrl,
+                hasAuthHeader: !!authHeader,
+                authHeaderPrefix: authHeader.substring(0, 10) + '...' // Log partial header for security
+            });
+
             const requestStartTime = Date.now();
             const response = await fetch(this.oneSignalApiUrl, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Basic ${env.ONESIGNAL_REST_API_KEY}`,
+                    'Authorization': authHeader,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(payload)
@@ -127,7 +156,7 @@ export class NotificationService {
 
             const requestDuration = Date.now() - requestStartTime;
             this.logger.log('DEBUG', 'OneSignal API request completed', {
-                userId,
+                userId: userIdString,
                 faxId: notification.faxId,
                 statusCode: response.status,
                 statusText: response.statusText,
@@ -135,9 +164,40 @@ export class NotificationService {
                 headers: Object.fromEntries(response.headers.entries())
             });
 
-            const responseData = await response.json();
+            // Parse response - handle both JSON and text responses
+            let responseData;
+            try {
+                const contentType = response.headers?.get?.('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    responseData = await response.json();
+                } else {
+                    const textResponse = await response.text();
+                    this.logger.log('WARN', 'OneSignal API returned non-JSON response', {
+                        userId: userIdString,
+                        faxId: notification.faxId,
+                        statusCode: response.status,
+                        responseText: textResponse.substring(0, 500)
+                    });
+                    responseData = { error: textResponse };
+                }
+            } catch (parseError) {
+                // If response parsing fails, try to get text
+                try {
+                    const textResponse = await response.text();
+                    responseData = { error: textResponse || 'Failed to parse response' };
+                } catch (textError) {
+                    this.logger.log('ERROR', 'Failed to parse OneSignal API response', {
+                        userId: userIdString,
+                        faxId: notification.faxId,
+                        parseError: parseError.message,
+                        textError: textError.message
+                    });
+                    responseData = { error: 'Failed to parse response' };
+                }
+            }
+
             this.logger.log('DEBUG', 'OneSignal API response received', {
-                userId,
+                userId: userIdString,
                 faxId: notification.faxId,
                 responseStatus: response.status,
                 responseData: {
@@ -145,34 +205,59 @@ export class NotificationService {
                     recipients: responseData.recipients,
                     errors: responseData.errors,
                     invalid_external_user_ids: responseData.invalid_external_user_ids,
-                    hasErrors: !!responseData.errors
+                    hasErrors: !!responseData.errors,
+                    hasInvalidUserIds: !!responseData.invalid_external_user_ids
                 }
             });
 
+            // Check for invalid external user IDs (user not found in OneSignal)
+            if (responseData.invalid_external_user_ids && responseData.invalid_external_user_ids.length > 0) {
+                this.logger.log('WARN', 'OneSignal returned invalid external user IDs', {
+                    userId: userIdString,
+                    faxId: notification.faxId,
+                    invalidUserIds: responseData.invalid_external_user_ids,
+                    message: 'User may not have OneSignal external_user_id set. Ensure OneSignal.login() is called in the app.'
+                });
+            }
+
             if (!response.ok) {
                 this.logger.log('ERROR', 'OneSignal API returned error', {
-                    userId,
+                    userId: userIdString,
                     faxId: notification.faxId,
                     status: response.status,
                     statusText: response.statusText,
-                    error: responseData.errors || responseData,
+                    error: responseData.errors || responseData.error || responseData,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids,
                     fullResponse: responseData,
                     requestDurationMs: requestDuration
                 });
                 return {
                     success: false,
-                    error: responseData.errors || 'OneSignal API error',
-                    statusCode: response.status
+                    error: responseData.errors || responseData.error || 'OneSignal API error',
+                    statusCode: response.status,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids
                 };
             }
 
+            // Check if notification was actually sent (recipients > 0)
+            const recipientCount = responseData.recipients || 0;
+            if (recipientCount === 0) {
+                this.logger.log('WARN', 'OneSignal API returned success but no recipients', {
+                    userId: userIdString,
+                    faxId: notification.faxId,
+                    oneSignalId: responseData.id,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids,
+                    message: 'Notification may not have been delivered. Check if external_user_id is set correctly.'
+                });
+            }
+
             this.logger.log('INFO', 'Push notification sent successfully', {
-                userId,
+                userId: userIdString,
                 faxId: notification.faxId,
                 status: notification.status,
                 oneSignalId: responseData.id,
                 recipients: responseData.recipients,
-                recipientCount: responseData.recipients || 0,
+                recipientCount: recipientCount,
                 requestDurationMs: requestDuration,
                 timestamp: new Date().toISOString()
             });
@@ -188,7 +273,7 @@ export class NotificationService {
                 error: error.message,
                 errorStack: error.stack,
                 errorName: error.name,
-                userId,
+                userId: typeof userId === 'string' ? userId : String(userId),
                 faxId: notification?.faxId,
                 notificationProvided: !!notification,
                 notificationKeys: notification ? Object.keys(notification) : []

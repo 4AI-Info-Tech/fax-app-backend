@@ -414,22 +414,39 @@ export class FaxDatabaseUtils {
 					credit_limit,
 					credits_used,
 					expires_at,
-					is_active
+					billing_period_start,
+					billing_period_end,
+					is_active,
+					products!inner(type)
 				`)
 				.eq('user_id', userId)
 				.eq('is_active', true)
 				.order('created_at', { ascending: false });
 
 			// Filter subscriptions: include if expires_at is NULL (doesn't expire) or expires_at > NOW()
+			// Also check billing period for annual subscriptions with monthly limits
 			const now = new Date();
 			const subscriptions = (allSubscriptions || []).filter(sub => {
-				if (!sub.expires_at) {
-					// NULL expires_at means subscription doesn't expire - include it
-					return true;
+				// Check subscription expiration
+				if (sub.expires_at) {
+					const expiresAt = new Date(sub.expires_at);
+					if (expiresAt <= now) {
+						return false; // Subscription expired
+					}
 				}
-				// Check if expiration date is in the future
-				const expiresAt = new Date(sub.expires_at);
-				return expiresAt > now;
+
+				// For annual subscriptions, check if we're within the current billing period
+				// If billing_period_end exists and is in the past, credits are not available
+				// (they will be reset by the cron job)
+				if (sub.billing_period_end) {
+					const periodEnd = new Date(sub.billing_period_end);
+					if (periodEnd < now) {
+						// Billing period expired - no credits available until reset
+						return false;
+					}
+				}
+
+				return true;
 			});
 
 			if (subError) {
@@ -459,6 +476,21 @@ export class FaxDatabaseUtils {
 			let primarySubscription = null;
 
 			for (const subscription of subscriptions) {
+				// Check if we're within the current billing period for annual subscriptions
+				const now = new Date();
+				let isWithinBillingPeriod = true;
+				
+				if (subscription.billing_period_start && subscription.billing_period_end) {
+					const periodStart = new Date(subscription.billing_period_start);
+					const periodEnd = new Date(subscription.billing_period_end);
+					isWithinBillingPeriod = now >= periodStart && now <= periodEnd;
+				}
+
+				if (!isWithinBillingPeriod) {
+					// Outside billing period - no credits available
+					continue;
+				}
+
 				const availableCredits = subscription.credit_limit - subscription.credits_used;
 				if (availableCredits > 0) {
 					totalAvailablePages += availableCredits;
