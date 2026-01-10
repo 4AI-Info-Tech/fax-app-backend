@@ -404,7 +404,9 @@ export class FaxDatabaseUtils {
 			const supabase = this.getSupabaseAdminClient(env);
 
 			// Get user's active subscriptions
-			const { data: subscriptions, error: subError } = await supabase
+			// Filter: is_active = true AND (expires_at IS NULL OR expires_at > NOW())
+			// This handles both non-expiring subscriptions (NULL) and UNSUBSCRIBE cancellations (expires_at set)
+			const { data: allSubscriptions, error: subError } = await supabase
 				.from('user_subscriptions')
 				.select(`
 					id,
@@ -416,8 +418,19 @@ export class FaxDatabaseUtils {
 				`)
 				.eq('user_id', userId)
 				.eq('is_active', true)
-				.gt('expires_at', new Date().toISOString())
 				.order('created_at', { ascending: false });
+
+			// Filter subscriptions: include if expires_at is NULL (doesn't expire) or expires_at > NOW()
+			const now = new Date();
+			const subscriptions = (allSubscriptions || []).filter(sub => {
+				if (!sub.expires_at) {
+					// NULL expires_at means subscription doesn't expire - include it
+					return true;
+				}
+				// Check if expiration date is in the future
+				const expiresAt = new Date(sub.expires_at);
+				return expiresAt > now;
+			});
 
 			if (subError) {
 				logger.log('ERROR', 'Failed to fetch user subscriptions', {

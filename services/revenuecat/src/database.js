@@ -249,28 +249,44 @@ export class DatabaseUtils {
 				}
 			}
 
-			// Deactivate user subscription if this is a cancellation or expiration event
+			// Handle cancellation and expiration events
 			if (['CANCELLATION', 'EXPIRATION'].includes(event.type) && userId && event.product_id) {
 				try {
 					// Find the active subscription for this user and product
 					const userSubscriptions = await DatabaseUtils.getUserSubscriptions(userId, { activeOnly: true }, env, logger);
-					const subscriptionToDeactivate = userSubscriptions.find(sub =>
+					const subscriptionToUpdate = userSubscriptions.find(sub =>
 						sub.product_id === event.product_id && sub.is_active
 					);
 
-					if (subscriptionToDeactivate) {
-						await DatabaseUtils.deactivateUserSubscription(subscriptionToDeactivate.id, env, logger);
-						logger.log('INFO', 'User subscription deactivated from webhook', {
-							userId: userId,
-							productId: event.product_id,
-							subscriptionId: subscriptionToDeactivate.id
-						});
+					if (subscriptionToUpdate) {
+						// For UNSUBSCRIBE cancellations, update expiration date instead of deactivating immediately
+						if (event.type === 'CANCELLATION' && event.cancel_reason === 'UNSUBSCRIBE' && event.expiration_at_ms) {
+							const expirationDate = new Date(parseInt(event.expiration_at_ms)).toISOString();
+							await DatabaseUtils.updateSubscriptionExpiration(subscriptionToUpdate.id, expirationDate, env, logger);
+							logger.log('INFO', 'User subscription expiration updated from UNSUBSCRIBE cancellation', {
+								userId: userId,
+								productId: event.product_id,
+								subscriptionId: subscriptionToUpdate.id,
+								expiresAt: expirationDate
+							});
+						} else {
+							// For other cancellations or expiration events, deactivate immediately
+							await DatabaseUtils.deactivateUserSubscription(subscriptionToUpdate.id, env, logger);
+							logger.log('INFO', 'User subscription deactivated from webhook', {
+								userId: userId,
+								productId: event.product_id,
+								subscriptionId: subscriptionToUpdate.id,
+								eventType: event.type,
+								cancelReason: event.cancel_reason
+							});
+						}
 					}
-				} catch (deactivationError) {
-					logger.log('ERROR', 'Failed to deactivate user subscription from webhook', {
-						error: deactivationError.message,
+				} catch (updateError) {
+					logger.log('ERROR', 'Failed to update user subscription from webhook', {
+						error: updateError.message,
 						userId: userId,
-						productId: event.product_id
+						productId: event.product_id,
+						eventType: event.type
 					});
 				}
 			}
@@ -752,6 +768,55 @@ export class DatabaseUtils {
 			return deactivatedSubscription;
 		} catch (error) {
 			logger.log('ERROR', 'Error deactivating user subscription', {
+				error: error.message,
+				subscriptionId: subscriptionId
+			});
+			return null;
+		}
+	}
+
+	/**
+	 * Update subscription expiration date (for UNSUBSCRIBE cancellations)
+	 * @param {string} subscriptionId - The subscription ID
+	 * @param {string} expiresAt - The expiration date (ISO string)
+	 * @param {Object} env - Environment variables
+	 * @param {Object} logger - Logger instance
+	 * @returns {Promise<Object|null>} - The updated subscription or null if failed
+	 */
+	static async updateSubscriptionExpiration(subscriptionId, expiresAt, env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot update subscription expiration');
+				return null;
+			}
+
+			const supabase = DatabaseUtils.getSupabaseAdminClient(env);
+
+			const { data: updatedSubscription, error } = await supabase
+				.from('user_subscriptions')
+				.update({ expires_at: expiresAt })
+				.eq('id', subscriptionId)
+				.select()
+				.single();
+
+			if (error) {
+				logger.log('ERROR', 'Failed to update subscription expiration', {
+					error: error.message,
+					subscriptionId: subscriptionId,
+					expiresAt: expiresAt
+				});
+				return null;
+			}
+
+			logger.log('INFO', 'Updated subscription expiration', {
+				subscriptionId: subscriptionId,
+				userId: updatedSubscription.user_id,
+				expiresAt: expiresAt
+			});
+
+			return updatedSubscription;
+		} catch (error) {
+			logger.log('ERROR', 'Error updating subscription expiration', {
 				error: error.message,
 				subscriptionId: subscriptionId
 			});
