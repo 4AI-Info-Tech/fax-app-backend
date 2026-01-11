@@ -113,7 +113,11 @@ export class NotificationService {
                     recipient_number: notification.recipientNumber,
                     deep_link: `sendfaxapp://fax/${notification.faxId}`
                 },
-                ios_badgeType: 'Increase',
+                // Use SetTo instead of Increase to set badge to 1
+                // This prevents badge count from accumulating incorrectly
+                // The app will clear the badge when opened, so each new notification
+                // should show as 1 unread notification
+                ios_badgeType: 'SetTo',
                 ios_badgeCount: 1
             };
 
