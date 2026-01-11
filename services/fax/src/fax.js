@@ -755,6 +755,17 @@ export default class extends WorkerEntrypoint {
 			// Update fax record using provider_fax_id as lookup key
 			const updatedFaxRecord = await DatabaseUtils.updateFaxRecord(telnyxFaxId, updateData, callerEnvObj, this.logger, 'provider_fax_id');
 
+			// Log updated fax record for debugging
+			this.logger.log('DEBUG', 'Fax record updated from webhook', {
+				telnyxFaxId,
+				hasUpdatedFaxRecord: !!updatedFaxRecord,
+				hasUserId: !!(updatedFaxRecord && updatedFaxRecord.user_id),
+				hasRecipients: !!(updatedFaxRecord && updatedFaxRecord.recipients),
+				recipientsType: updatedFaxRecord?.recipients ? typeof updatedFaxRecord.recipients : 'none',
+				recipientsValue: updatedFaxRecord?.recipients,
+				status: standardizedStatus
+			});
+
 			// Store webhook event for audit/logging
 			await DatabaseUtils.storeWebhookEvent({
 				event: eventType,
@@ -860,13 +871,68 @@ export default class extends WorkerEntrypoint {
 
 			// Send push notification for terminal statuses (delivered or failed)
 			if (updatedFaxRecord && updatedFaxRecord.user_id && ['delivered', 'failed'].includes(standardizedStatus)) {
+				// Ensure recipients is an array (handle JSONB from database)
+				let recipients = updatedFaxRecord.recipients || [];
+				
+				// Parse if recipients is a JSON string
+				if (typeof recipients === 'string') {
+					try {
+						recipients = JSON.parse(recipients);
+					} catch (e) {
+						this.logger.log('WARN', 'Failed to parse recipients JSON string', {
+							faxId: updatedFaxRecord.id,
+							recipientsString: recipients,
+							error: e.message
+						});
+						recipients = [];
+					}
+				}
+				
+				// Ensure recipients is an array
+				if (!Array.isArray(recipients)) {
+					this.logger.log('WARN', 'Recipients is not an array, converting', {
+						faxId: updatedFaxRecord.id,
+						recipientsType: typeof recipients,
+						recipientsValue: recipients
+					});
+					recipients = recipients ? [recipients] : [];
+				}
+				
+				// Fallback: if no recipients in database, try to get from webhook payload
+				if (recipients.length === 0) {
+					const toNumber = payload.to || null;
+					if (toNumber) {
+						this.logger.log('INFO', 'Using recipient from webhook payload as fallback', {
+							faxId: updatedFaxRecord.id,
+							toNumber
+						});
+						recipients = [toNumber];
+					}
+				}
+				
+				this.logger.log('INFO', 'Preparing to send push notification from webhook', {
+					faxId: updatedFaxRecord.id,
+					userId: updatedFaxRecord.user_id,
+					status: standardizedStatus,
+					recipientsCount: recipients.length,
+					recipients: recipients,
+					hasErrorMessage: !!updateData.error_message
+				});
+				
 				await this.sendFaxStatusPushNotification({
 					id: updatedFaxRecord.id,
 					user_id: updatedFaxRecord.user_id,
 					status: standardizedStatus,
-					recipients: updatedFaxRecord.recipients || [],
+					recipients: recipients,
 					error_message: updateData.error_message
 				}, callerEnvObj);
+			} else {
+				this.logger.log('DEBUG', 'Skipping push notification from webhook', {
+					hasUpdatedFaxRecord: !!updatedFaxRecord,
+					hasUserId: !!(updatedFaxRecord && updatedFaxRecord.user_id),
+					status: standardizedStatus,
+					isTerminalStatus: ['delivered', 'failed'].includes(standardizedStatus)
+				});
 			}
 
 			this.logger.log('INFO', 'Telnyx webhook processed successfully', { 
@@ -1064,13 +1130,55 @@ export default class extends WorkerEntrypoint {
 
 			// Send push notification for terminal statuses (delivered or failed)
 			if (updatedFaxRecord && updatedFaxRecord.user_id && ['delivered', 'failed'].includes(standardizedStatus)) {
+				// Ensure recipients is an array (handle JSONB from database)
+				let recipients = updatedFaxRecord.recipients || [];
+				
+				// Parse if recipients is a JSON string
+				if (typeof recipients === 'string') {
+					try {
+						recipients = JSON.parse(recipients);
+					} catch (e) {
+						this.logger.log('WARN', 'Failed to parse recipients JSON string', {
+							faxId: updatedFaxRecord.id,
+							recipientsString: recipients,
+							error: e.message
+						});
+						recipients = [];
+					}
+				}
+				
+				// Ensure recipients is an array
+				if (!Array.isArray(recipients)) {
+					this.logger.log('WARN', 'Recipients is not an array, converting', {
+						faxId: updatedFaxRecord.id,
+						recipientsType: typeof recipients,
+						recipientsValue: recipients
+					});
+					recipients = recipients ? [recipients] : [];
+				}
+				
+				this.logger.log('INFO', 'Preparing to send push notification from webhook', {
+					faxId: updatedFaxRecord.id,
+					userId: updatedFaxRecord.user_id,
+					status: standardizedStatus,
+					recipientsCount: recipients.length,
+					recipients: recipients
+				});
+				
 				await this.sendFaxStatusPushNotification({
 					id: updatedFaxRecord.id,
 					user_id: updatedFaxRecord.user_id,
 					status: standardizedStatus,
-					recipients: updatedFaxRecord.recipients || [],
+					recipients: recipients,
 					error_message: null // Notifyre doesn't provide error message in the same way
 				}, callerEnvObj);
+			} else {
+				this.logger.log('DEBUG', 'Skipping push notification from webhook', {
+					hasUpdatedFaxRecord: !!updatedFaxRecord,
+					hasUserId: !!(updatedFaxRecord && updatedFaxRecord.user_id),
+					status: standardizedStatus,
+					isTerminalStatus: ['delivered', 'failed'].includes(standardizedStatus)
+				});
 			}
 
 			this.logger.log('INFO', 'Notifyre webhook processed successfully', { 
@@ -2098,6 +2206,190 @@ export default class extends WorkerEntrypoint {
 			await cache.put(cacheKey, response);
 		} catch (error) {
 			this.logger.log('DEBUG', 'Cache API put failed', { error: error.message });
+		}
+	}
+
+	/**
+	 * Test endpoint for sending push notifications
+	 * Creates example fax records and sends notifications
+	 * @param {Request} request - The HTTP request
+	 * @param {Object} caller_env - Environment variables
+	 * @param {Object} sagContext - Serverless API Gateway context
+	 * @returns {Promise<Object>} Response object
+	 */
+	async testNotification(request, caller_env = "{}", sagContext = "{}") {
+		try {
+			// Ensure caller_env is an object
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+
+			this.logger.log('INFO', 'Test notification endpoint called');
+
+			// Parse request body or URL parameters
+			const url = new URL(request.url);
+			let userId = url.searchParams.get('user_id');
+			let faxStatus = url.searchParams.get('fax_status') || 'delivered';
+
+			// Try to get from request body if not in URL
+			if (!userId) {
+				try {
+					const body = await request.json().catch(() => ({}));
+					userId = body.user_id || userId;
+					faxStatus = body.fax_status || faxStatus;
+				} catch (e) {
+					// Body parsing failed, use URL params only
+				}
+			}
+
+			// Validate inputs
+			if (!userId) {
+				return {
+					statusCode: 400,
+					error: 'Missing parameter',
+					message: "Missing 'user_id' parameter. Use /v1/fax/test-notification?user_id=<uuid>&fax_status=delivered|failed"
+				};
+			}
+
+			// Validate fax_status
+			const validStatuses = ['delivered', 'failed'];
+			if (!validStatuses.includes(faxStatus)) {
+				return {
+					statusCode: 400,
+					error: 'Invalid parameter',
+					message: `Invalid 'fax_status'. Must be one of: ${validStatuses.join(', ')}`
+				};
+			}
+
+			// Ensure notification service is initialized
+			if (!this.notificationService) {
+				this.notificationService = new NotificationService(this.logger);
+			}
+
+			// Create example fax records based on status
+			const exampleFaxes = {
+				delivered: [
+					{
+						id: `test-fax-${Date.now()}-1`,
+						user_id: userId,
+						status: 'delivered',
+						recipients: ['+1-555-123-4567'],
+						error_message: null
+					},
+					{
+						id: `test-fax-${Date.now()}-2`,
+						user_id: userId,
+						status: 'delivered',
+						recipients: ['+44-20-7946-0958'],
+						error_message: null
+					},
+					{
+						id: `test-fax-${Date.now()}-3`,
+						user_id: userId,
+						status: 'delivered',
+						recipients: ['+1-330-341-7001'],
+						error_message: null
+					}
+				],
+				failed: [
+					{
+						id: `test-fax-${Date.now()}-1`,
+						user_id: userId,
+						status: 'failed',
+						recipients: ['+1-555-123-4567'],
+						error_message: 'No answer from recipient'
+					},
+					{
+						id: `test-fax-${Date.now()}-2`,
+						user_id: userId,
+						status: 'failed',
+						recipients: ['+44-20-7946-0958'],
+						error_message: 'Busy signal detected'
+					},
+					{
+						id: `test-fax-${Date.now()}-3`,
+						user_id: userId,
+						status: 'failed',
+						recipients: ['+1-330-341-7001'],
+						error_message: 'Connection timeout'
+					}
+				]
+			};
+
+			const faxesToSend = exampleFaxes[faxStatus];
+			const results = [];
+
+			// Send notifications for each example fax
+			for (const fax of faxesToSend) {
+				this.logger.log('INFO', 'Sending test notification', {
+					faxId: fax.id,
+					userId: fax.user_id,
+					status: fax.status,
+					recipient: fax.recipients[0]
+				});
+
+				const result = await this.notificationService.sendFaxStatusNotification(callerEnvObj, fax);
+				
+				results.push({
+					faxId: fax.id,
+					recipient: fax.recipients[0],
+					status: fax.status,
+					errorMessage: fax.error_message,
+					notificationResult: result
+				});
+
+				// Add small delay between notifications to avoid rate limiting
+				await new Promise(resolve => setTimeout(resolve, 500));
+			}
+
+			const successCount = results.filter(r => r.notificationResult.success).length;
+			const failedCount = results.filter(r => !r.notificationResult.success && !r.notificationResult.skipped).length;
+			const skippedCount = results.filter(r => r.notificationResult.skipped).length;
+
+			this.logger.log('INFO', 'Test notifications completed', {
+				userId,
+				faxStatus,
+				total: results.length,
+				success: successCount,
+				failed: failedCount,
+				skipped: skippedCount
+			});
+
+			return {
+				statusCode: 200,
+				message: 'Test notifications sent',
+				data: {
+					userId,
+					faxStatus,
+					totalSent: results.length,
+					summary: {
+						success: successCount,
+						failed: failedCount,
+						skipped: skippedCount
+					},
+					results: results.map(r => ({
+						faxId: r.faxId,
+						recipient: r.recipient,
+						status: r.status,
+						errorMessage: r.errorMessage,
+						notificationSuccess: r.notificationResult.success,
+						notificationSkipped: r.notificationResult.skipped,
+						notificationError: r.notificationResult.error,
+						oneSignalId: r.notificationResult.id
+					}))
+				},
+				timestamp: new Date().toISOString()
+			};
+
+		} catch (error) {
+			this.logger.log('ERROR', 'Error in testNotification endpoint', {
+				error: error.message,
+				stack: error.stack
+			});
+
+			return {
+				statusCode: 500,
+				error: 'Test notification failed',
+				message: error.message
+			};
 		}
 	}
 

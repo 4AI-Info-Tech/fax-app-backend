@@ -78,12 +78,21 @@ export class NotificationService {
             }
 
             // Ensure userId is a string (convert UUID if needed)
-            const userIdString = typeof userId === 'string' ? userId : String(userId);
+            let userIdString = typeof userId === 'string' ? userId : String(userId);
             
-            // Validate userId format (should be a UUID string for production)
-            // Warn if not UUID format, but allow it to proceed (OneSignal will handle validation)
+            // Normalize UUID to uppercase for OneSignal external_user_id matching
+            // OneSignal's external_user_id matching is case-sensitive, and the iOS app
+            // sets it in uppercase format (e.g., "3C16173C-8B0C-4F77-898D-F984021C7CC9")
+            // PostgreSQL stores UUIDs in lowercase, so we need to convert to uppercase
             const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (!uuidRegex.test(userIdString)) {
+            if (uuidRegex.test(userIdString)) {
+                // Convert UUID to uppercase to match OneSignal's external_user_id format
+                userIdString = userIdString.toUpperCase();
+                this.logger.log('DEBUG', 'Normalized user ID to uppercase for OneSignal', {
+                    original: userId,
+                    normalized: userIdString
+                });
+            } else {
                 this.logger.log('WARN', 'User ID does not match UUID format - OneSignal may reject if external_user_id not set', {
                     userId: userIdString,
                     faxId: notification?.faxId,

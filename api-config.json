@@ -107,6 +107,16 @@
         },
         {
             "method": "POST",
+            "path": "/v1/fax/test-notification",
+            "integration": {
+                "type": "service_binding",
+                "binding": "fax_service",
+                "function": "testNotification"
+            },
+            "auth": false
+        },
+        {
+            "method": "POST",
             "path": "/v1/fax/webhook/telnyx",
             "integration": {
                 "type": "service_binding",

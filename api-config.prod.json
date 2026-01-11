@@ -110,6 +110,16 @@
             "auth": false
         },
         {
+            "method": "POST",
+            "path": "/v1/fax/test-notification",
+            "integration": {
+                "type": "service_binding",
+                "binding": "fax_service",
+                "function": "testNotification"
+            },
+            "auth": false
+        },
+        {
             "method": "GET",
             "path": "/v1/env-test/debug",
             "integration": {
