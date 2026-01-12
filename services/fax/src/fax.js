@@ -60,14 +60,15 @@ export default class extends WorkerEntrypoint {
 				this.notificationService = new NotificationService(this.logger);
 			}
 
-			// Send the notification
+			// Send the notification (includes deep link: sendfaxapp://fax/{faxId})
 			const result = await this.notificationService.sendFaxStatusNotification(callerEnvObj, fax);
 
 			if (result.success) {
 				this.logger.log('INFO', 'Push notification sent for fax status change', {
 					faxId: fax.id,
 					status: fax.status,
-					userId: fax.user_id
+					userId: fax.user_id,
+					deepLink: `sendfaxapp://fax/${fax.id}`
 				});
 			} else if (result.skipped) {
 				this.logger.log('DEBUG', 'Push notification skipped', {
@@ -916,7 +917,8 @@ export default class extends WorkerEntrypoint {
 					status: standardizedStatus,
 					recipientsCount: recipients.length,
 					recipients: recipients,
-					hasErrorMessage: !!updateData.error_message
+					hasErrorMessage: !!updateData.error_message,
+					deepLink: `sendfaxapp://fax/${updatedFaxRecord.id}`
 				});
 				
 				await this.sendFaxStatusPushNotification({
@@ -2228,13 +2230,15 @@ export default class extends WorkerEntrypoint {
 			const url = new URL(request.url);
 			let userId = url.searchParams.get('user_id');
 			let faxStatus = url.searchParams.get('fax_status') || 'delivered';
+			let faxId = url.searchParams.get('fax_id');
 
 			// Try to get from request body if not in URL
-			if (!userId) {
+			if (!userId || !faxId) {
 				try {
 					const body = await request.json().catch(() => ({}));
 					userId = body.user_id || userId;
 					faxStatus = body.fax_status || faxStatus;
+					faxId = body.fax_id || faxId;
 				} catch (e) {
 					// Body parsing failed, use URL params only
 				}
@@ -2245,7 +2249,15 @@ export default class extends WorkerEntrypoint {
 				return {
 					statusCode: 400,
 					error: 'Missing parameter',
-					message: "Missing 'user_id' parameter. Use /v1/fax/test-notification?user_id=<uuid>&fax_status=delivered|failed"
+					message: "Missing 'user_id' parameter. Use /v1/fax/test-notification with JSON body: {\"user_id\":\"<uuid>\",\"fax_status\":\"delivered|failed\",\"fax_id\":\"<uuid>\"}"
+				};
+			}
+
+			if (!faxId) {
+				return {
+					statusCode: 400,
+					error: 'Missing parameter',
+					message: "Missing 'fax_id' parameter. Use /v1/fax/test-notification with JSON body: {\"user_id\":\"<uuid>\",\"fax_status\":\"delivered|failed\",\"fax_id\":\"<uuid>\"}"
 				};
 			}
 
@@ -2264,117 +2276,48 @@ export default class extends WorkerEntrypoint {
 				this.notificationService = new NotificationService(this.logger);
 			}
 
-			// Create example fax records based on status
-			const exampleFaxes = {
-				delivered: [
-					{
-						id: `test-fax-${Date.now()}-1`,
-						user_id: userId,
-						status: 'delivered',
-						recipients: ['+1-555-123-4567'],
-						error_message: null
-					},
-					{
-						id: `test-fax-${Date.now()}-2`,
-						user_id: userId,
-						status: 'delivered',
-						recipients: ['+44-20-7946-0958'],
-						error_message: null
-					},
-					{
-						id: `test-fax-${Date.now()}-3`,
-						user_id: userId,
-						status: 'delivered',
-						recipients: ['+1-330-341-7001'],
-						error_message: null
-					}
-				],
-				failed: [
-					{
-						id: `test-fax-${Date.now()}-1`,
-						user_id: userId,
-						status: 'failed',
-						recipients: ['+1-555-123-4567'],
-						error_message: 'No answer from recipient'
-					},
-					{
-						id: `test-fax-${Date.now()}-2`,
-						user_id: userId,
-						status: 'failed',
-						recipients: ['+44-20-7946-0958'],
-						error_message: 'Busy signal detected'
-					},
-					{
-						id: `test-fax-${Date.now()}-3`,
-						user_id: userId,
-						status: 'failed',
-						recipients: ['+1-330-341-7001'],
-						error_message: 'Connection timeout'
-					}
-				]
+			// Create a single test fax record with the provided fax_id
+			const testFax = {
+				id: faxId,
+				user_id: userId,
+				status: faxStatus,
+				recipients: ['+1-555-123-4567'],
+				error_message: faxStatus === 'failed' ? 'Test error message' : null
 			};
 
-			const faxesToSend = exampleFaxes[faxStatus];
-			const results = [];
+			this.logger.log('INFO', 'Sending test notification', {
+				faxId: testFax.id,
+				userId: testFax.user_id,
+				status: testFax.status,
+				recipient: testFax.recipients[0]
+			});
 
-			// Send notifications for each example fax
-			for (const fax of faxesToSend) {
-				this.logger.log('INFO', 'Sending test notification', {
-					faxId: fax.id,
-					userId: fax.user_id,
-					status: fax.status,
-					recipient: fax.recipients[0]
-				});
+			// Send notification
+			const result = await this.notificationService.sendFaxStatusNotification(callerEnvObj, testFax);
 
-				const result = await this.notificationService.sendFaxStatusNotification(callerEnvObj, fax);
-				
-				results.push({
-					faxId: fax.id,
-					recipient: fax.recipients[0],
-					status: fax.status,
-					errorMessage: fax.error_message,
-					notificationResult: result
-				});
-
-				// Add small delay between notifications to avoid rate limiting
-				await new Promise(resolve => setTimeout(resolve, 500));
-			}
-
-			const successCount = results.filter(r => r.notificationResult.success).length;
-			const failedCount = results.filter(r => !r.notificationResult.success && !r.notificationResult.skipped).length;
-			const skippedCount = results.filter(r => r.notificationResult.skipped).length;
-
-			this.logger.log('INFO', 'Test notifications completed', {
+			this.logger.log('INFO', 'Test notification completed', {
 				userId,
 				faxStatus,
-				total: results.length,
-				success: successCount,
-				failed: failedCount,
-				skipped: skippedCount
+				faxId,
+				success: result.success,
+				skipped: result.skipped || false,
+				error: result.error || null
 			});
 
 			return {
 				statusCode: 200,
-				message: 'Test notifications sent',
+				message: 'Test notification sent',
 				data: {
 					userId,
 					faxStatus,
-					totalSent: results.length,
-					summary: {
-						success: successCount,
-						failed: failedCount,
-						skipped: skippedCount
-					},
-					results: results.map(r => ({
-						faxId: r.faxId,
-						recipient: r.recipient,
-						status: r.status,
-						errorMessage: r.errorMessage,
-						notificationSuccess: r.notificationResult.success,
-						notificationSkipped: r.notificationResult.skipped,
-						notificationError: r.notificationResult.error,
-						oneSignalId: r.notificationResult.id
-					}))
+					faxId,
+					recipient: testFax.recipients[0],
+					errorMessage: testFax.error_message,
+					notificationSuccess: result.success,
+					notificationSkipped: result.skipped || false,
+					notificationError: result.error || null,
+					oneSignalId: result.id || null,
+					deepLink: `sendfaxapp://fax/${faxId}`
 				},
 				timestamp: new Date().toISOString()
 			};

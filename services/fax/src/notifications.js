@@ -131,8 +131,17 @@ export class NotificationService {
                     external_user_ids: payload.include_external_user_ids,
                     title: payload.headings.en,
                     messageLength: payload.contents.en?.length || 0,
-                    dataKeys: Object.keys(payload.data)
+                    dataKeys: Object.keys(payload.data),
+                    data: payload.data
                 }
+            });
+            
+            // Log the deep link specifically
+            this.logger.log('INFO', 'OneSignal notification deep link', {
+                faxId: notification.faxId,
+                deepLink: payload.data.deep_link,
+                deepLinkFormat: `sendfaxapp://fax/${notification.faxId}`,
+                dataField: JSON.stringify(payload.data)
             });
 
             this.logger.log('DEBUG', 'Sending push notification via OneSignal', {
