@@ -37,6 +37,127 @@ export default class extends WorkerEntrypoint {
 	}
 
 	/**
+	 * Deduct credits for a delivered fax based on user type
+	 * For paid subscribers: deduct from subscription credits
+	 * For free users: deduct from free credits (FIFO by expiry)
+	 * @param {string} userId - User ID
+	 * @param {number} creditsToDeduct - Number of credits to deduct
+	 * @param {string} faxId - Fax ID for reference
+	 * @param {Object} callerEnvObj - Environment variables
+	 * @param {string} provider - Provider name for logging
+	 * @returns {Promise<void>}
+	 */
+	async deductCreditsForDeliveredFax(userId, creditsToDeduct, faxId, callerEnvObj, provider) {
+		try {
+			const { createClient } = await import('@supabase/supabase-js');
+			const supabase = createClient(callerEnvObj.SUPABASE_URL, callerEnvObj.SUPABASE_SERVICE_ROLE_KEY, {
+				auth: {
+					autoRefreshToken: false,
+					persistSession: false
+				}
+			});
+
+			// Check if user is a paid subscriber
+			const isPaidSubscriber = await FaxDatabaseUtils.isUserPaidSubscriber(userId, callerEnvObj, this.logger);
+
+			if (isPaidSubscriber) {
+				// Paid user - deduct from subscription credits
+				this.logger.log('INFO', 'Deducting credits from paid subscription', {
+					userId,
+					creditsToDeduct,
+					faxId,
+					provider
+				});
+
+				// Get user's active subscriptions (excluding freemium)
+				const { data: allSubscriptions, error: subError } = await supabase
+					.from('user_subscriptions')
+					.select('id, credits_used, expires_at, product_id')
+					.eq('user_id', userId)
+					.eq('is_active', true)
+					.neq('product_id', 'freemium_monthly')
+					.order('created_at', { ascending: false });
+
+				// Filter subscriptions: include if expires_at is NULL or expires_at > NOW()
+				const now = new Date();
+				const subscriptions = (allSubscriptions || []).filter(sub => {
+					if (!sub.expires_at) return true;
+					return new Date(sub.expires_at) > now;
+				});
+
+				if (!subError && subscriptions && subscriptions.length > 0) {
+					const subscription = subscriptions[0];
+					const newCreditsUsed = (subscription.credits_used || 0) + creditsToDeduct;
+
+					const { error: updateError } = await supabase
+						.from('user_subscriptions')
+						.update({ 
+							credits_used: newCreditsUsed,
+							updated_at: new Date().toISOString()
+						})
+						.eq('id', subscription.id);
+
+					if (updateError) {
+						this.logger.log('ERROR', 'Failed to update subscription credits_used', {
+							userId,
+							subscriptionId: subscription.id,
+							creditsToDeduct,
+							error: updateError.message
+						});
+					} else {
+						this.logger.log('INFO', 'Subscription credits deducted successfully', {
+							userId,
+							subscriptionId: subscription.id,
+							creditsDeducted: creditsToDeduct,
+							newCreditsUsed,
+							provider
+						});
+					}
+				}
+			} else {
+				// Free user - deduct from free credits
+				this.logger.log('INFO', 'Deducting credits from free credits', {
+					userId,
+					creditsToDeduct,
+					faxId,
+					provider
+				});
+
+				const result = await FaxDatabaseUtils.consumeFreeCredits(
+					userId,
+					creditsToDeduct,
+					callerEnvObj,
+					this.logger,
+					faxId
+				);
+
+				if (result.success) {
+					this.logger.log('INFO', 'Free credits deducted successfully', {
+						userId,
+						creditsDeducted: creditsToDeduct,
+						faxId,
+						provider
+					});
+				} else {
+					this.logger.log('ERROR', 'Failed to deduct free credits', {
+						userId,
+						creditsToDeduct,
+						faxId,
+						error: result.error
+					});
+				}
+			}
+		} catch (error) {
+			this.logger.log('ERROR', 'Error deducting credits for delivered fax', {
+				userId,
+				creditsToDeduct,
+				faxId,
+				error: error.message
+			});
+		}
+	}
+
+	/**
 	 * Send push notification for fax status change
 	 * Handles notification sending gracefully - failures don't affect webhook processing
 	 * @param {Object} fax - Fax record with status information
@@ -799,75 +920,14 @@ export default class extends WorkerEntrypoint {
 					}
 				}, callerEnvObj, this.logger);
 				
-				// Update subscription's credits_used field (using actual credit cost)
-				try {
-					// Find the user's active subscription to update
-					const { createClient } = await import('@supabase/supabase-js');
-					const supabase = createClient(callerEnvObj.SUPABASE_URL, callerEnvObj.SUPABASE_SERVICE_ROLE_KEY, {
-						auth: {
-							autoRefreshToken: false,
-							persistSession: false
-						}
-					});
-					
-					// Get user's active subscriptions
-					// Filter: is_active = true AND (expires_at IS NULL OR expires_at > NOW())
-					// This handles both non-expiring subscriptions (NULL) and UNSUBSCRIBE cancellations (expires_at set)
-					const { data: allSubscriptions, error: subError } = await supabase
-						.from('user_subscriptions')
-						.select('id, credits_used, expires_at')
-						.eq('user_id', updatedFaxRecord.user_id)
-						.eq('is_active', true)
-						.order('created_at', { ascending: false });
-					
-					// Filter subscriptions: include if expires_at is NULL (doesn't expire) or expires_at > NOW()
-					const now = new Date();
-					const subscriptions = (allSubscriptions || []).filter(sub => {
-						if (!sub.expires_at) {
-							// NULL expires_at means subscription doesn't expire - include it
-							return true;
-						}
-						// Check if expiration date is in the future
-						const expiresAt = new Date(sub.expires_at);
-						return expiresAt > now;
-					});
-					
-					if (!subError && subscriptions && subscriptions.length > 0) {
-						// Update the first (most recent) active subscription
-						const subscription = subscriptions[0];
-						const newCreditsUsed = (subscription.credits_used || 0) + creditsToDeduct;
-						
-						const { error: updateError } = await supabase
-							.from('user_subscriptions')
-							.update({ 
-								credits_used: newCreditsUsed,
-								updated_at: new Date().toISOString()
-							})
-							.eq('id', subscription.id);
-						
-						if (updateError) {
-							this.logger.log('ERROR', 'Failed to update subscription credits_used in webhook', {
-								userId: updatedFaxRecord.user_id,
-								subscriptionId: subscription.id,
-								creditsUsed: creditsToDeduct,
-								error: updateError.message
-							});
-						} else {
-							this.logger.log('INFO', 'Added used credits to subscription credits_used in webhook', {
-								userId: updatedFaxRecord.user_id,
-								subscriptionId: subscription.id,
-								creditsAdded: creditsToDeduct,
-								previousCreditsUsed: subscription.credits_used || 0,
-								newCreditsUsed: newCreditsUsed
-							});
-						}
-					}
-				} catch (error) {
-					this.logger.log('ERROR', 'Error updating subscription credits_used in webhook', {
-						userId: updatedFaxRecord.user_id,
-						error: error.message
-					});
-				}
+				// Deduct credits based on user type (paid vs free)
+				await this.deductCreditsForDeliveredFax(
+					updatedFaxRecord.user_id,
+					creditsToDeduct,
+					updatedFaxRecord.id,
+					callerEnvObj,
+					'telnyx'
+				);
 			}
 
 			// Send push notification for terminal statuses (delivered or failed)
@@ -1059,75 +1119,14 @@ export default class extends WorkerEntrypoint {
 					}
 				}, callerEnvObj, this.logger);
 				
-				// Update subscription's credits_used field (using actual credit cost)
-				try {
-					// Find the user's active subscription to update
-					const { createClient } = await import('@supabase/supabase-js');
-					const supabase = createClient(callerEnvObj.SUPABASE_URL, callerEnvObj.SUPABASE_SERVICE_ROLE_KEY, {
-						auth: {
-							autoRefreshToken: false,
-							persistSession: false
-						}
-					});
-					
-					// Get user's active subscriptions
-					// Filter: is_active = true AND (expires_at IS NULL OR expires_at > NOW())
-					// This handles both non-expiring subscriptions (NULL) and UNSUBSCRIBE cancellations (expires_at set)
-					const { data: allSubscriptions, error: subError } = await supabase
-						.from('user_subscriptions')
-						.select('id, credits_used, expires_at')
-						.eq('user_id', updatedFaxRecord.user_id)
-						.eq('is_active', true)
-						.order('created_at', { ascending: false });
-					
-					// Filter subscriptions: include if expires_at is NULL (doesn't expire) or expires_at > NOW()
-					const now = new Date();
-					const subscriptions = (allSubscriptions || []).filter(sub => {
-						if (!sub.expires_at) {
-							// NULL expires_at means subscription doesn't expire - include it
-							return true;
-						}
-						// Check if expiration date is in the future
-						const expiresAt = new Date(sub.expires_at);
-						return expiresAt > now;
-					});
-					
-					if (!subError && subscriptions && subscriptions.length > 0) {
-						// Update the first (most recent) active subscription
-						const subscription = subscriptions[0];
-						const newCreditsUsed = (subscription.credits_used || 0) + creditsToDeduct;
-						
-						const { error: updateError } = await supabase
-							.from('user_subscriptions')
-							.update({ 
-								credits_used: newCreditsUsed,
-								updated_at: new Date().toISOString()
-							})
-							.eq('id', subscription.id);
-						
-						if (updateError) {
-							this.logger.log('ERROR', 'Failed to update subscription credits_used in webhook', {
-								userId: updatedFaxRecord.user_id,
-								subscriptionId: subscription.id,
-								creditsUsed: creditsToDeduct,
-								error: updateError.message
-							});
-						} else {
-							this.logger.log('INFO', 'Added used credits to subscription credits_used in webhook', {
-								userId: updatedFaxRecord.user_id,
-								subscriptionId: subscription.id,
-								creditsAdded: creditsToDeduct,
-								previousCreditsUsed: subscription.credits_used || 0,
-								newCreditsUsed: newCreditsUsed
-							});
-						}
-					}
-				} catch (error) {
-					this.logger.log('ERROR', 'Error updating subscription credits_used in webhook', {
-						userId: updatedFaxRecord.user_id,
-						error: error.message
-					});
-				}
+				// Deduct credits based on user type (paid vs free)
+				await this.deductCreditsForDeliveredFax(
+					updatedFaxRecord.user_id,
+					creditsToDeduct,
+					updatedFaxRecord.id,
+					callerEnvObj,
+					'notifyre'
+				);
 			}
 
 			// Send push notification for terminal statuses (delivered or failed)

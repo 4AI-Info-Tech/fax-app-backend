@@ -384,6 +384,8 @@ export class FaxDatabaseUtils {
 
 	/**
 	 * Check if user has enough credits to send fax
+	 * For paid subscribers: use subscription credits
+	 * For free users: use free credits (from signup, referrals, ads, etc.)
 	 * @param {string} userId - User ID
 	 * @param {number} pagesRequired - Number of pages required for the fax
 	 * @param {Object} env - Environment variables
@@ -397,126 +399,23 @@ export class FaxDatabaseUtils {
 					hasCredits: false,
 					error: 'User ID is required',
 					availablePages: 0,
-					subscriptionId: null
+					subscriptionId: null,
+					creditSource: null
 				};
 			}
 
 			const supabase = this.getSupabaseAdminClient(env);
 
-			// Get user's active subscriptions
-			// Filter: is_active = true AND (expires_at IS NULL OR expires_at > NOW())
-			// This handles both non-expiring subscriptions (NULL) and UNSUBSCRIBE cancellations (expires_at set)
-			const { data: allSubscriptions, error: subError } = await supabase
-				.from('user_subscriptions')
-				.select(`
-					id,
-					product_id,
-					credit_limit,
-					credits_used,
-					expires_at,
-					billing_period_start,
-					billing_period_end,
-					is_active,
-					products!inner(type)
-				`)
-				.eq('user_id', userId)
-				.eq('is_active', true)
-				.order('created_at', { ascending: false });
+			// First check if user is a paid subscriber (not freemium)
+			const isPaidSubscriber = await this.isUserPaidSubscriber(userId, env, logger);
 
-			// Filter subscriptions: include if expires_at is NULL (doesn't expire) or expires_at > NOW()
-			// Also check billing period for annual subscriptions with monthly limits
-			const now = new Date();
-			const subscriptions = (allSubscriptions || []).filter(sub => {
-				// Check subscription expiration
-				if (sub.expires_at) {
-					const expiresAt = new Date(sub.expires_at);
-					if (expiresAt <= now) {
-						return false; // Subscription expired
-					}
-				}
-
-				// For annual subscriptions, check if we're within the current billing period
-				// If billing_period_end exists and is in the past, credits are not available
-				// (they will be reset by the cron job)
-				if (sub.billing_period_end) {
-					const periodEnd = new Date(sub.billing_period_end);
-					if (periodEnd < now) {
-						// Billing period expired - no credits available until reset
-						return false;
-					}
-				}
-
-				return true;
-			});
-
-			if (subError) {
-				logger.log('ERROR', 'Failed to fetch user subscriptions', {
-					error: subError.message,
-					userId: userId
-				});
-				return {
-					hasCredits: false,
-					error: 'Failed to check user credits',
-					availablePages: 0,
-					subscriptionId: null
-				};
+			if (isPaidSubscriber) {
+				// Paid user - use subscription credits
+				return await this.checkSubscriptionCredits(userId, pagesRequired, env, logger);
+			} else {
+				// Free user - use free credits
+				return await this.checkFreeCredits(userId, pagesRequired, env, logger);
 			}
-
-			if (!subscriptions || subscriptions.length === 0) {
-				return {
-					hasCredits: false,
-					error: 'No active subscriptions found',
-					availablePages: 0,
-					subscriptionId: null
-				};
-			}
-
-			// Calculate total available pages across all subscriptions
-			let totalAvailablePages = 0;
-			let primarySubscription = null;
-
-			for (const subscription of subscriptions) {
-				// Check if we're within the current billing period for annual subscriptions
-				const now = new Date();
-				let isWithinBillingPeriod = true;
-				
-				if (subscription.billing_period_start && subscription.billing_period_end) {
-					const periodStart = new Date(subscription.billing_period_start);
-					const periodEnd = new Date(subscription.billing_period_end);
-					isWithinBillingPeriod = now >= periodStart && now <= periodEnd;
-				}
-
-				if (!isWithinBillingPeriod) {
-					// Outside billing period - no credits available
-					continue;
-				}
-
-				const availableCredits = subscription.credit_limit - subscription.credits_used;
-				if (availableCredits > 0) {
-					totalAvailablePages += availableCredits;
-					if (!primarySubscription) {
-						primarySubscription = subscription;
-					}
-				}
-			}
-
-			const hasCredits = totalAvailablePages >= pagesRequired;
-
-			logger.log('INFO', 'Credit check completed', {
-				userId: userId,
-				pagesRequired: pagesRequired,
-				totalAvailablePages: totalAvailablePages,
-				hasCredits: hasCredits,
-				subscriptionCount: subscriptions.length
-			});
-
-			return {
-				hasCredits: hasCredits,
-				availablePages: totalAvailablePages,
-				subscriptionId: primarySubscription?.id || null,
-				subscriptions: subscriptions,
-				error: null
-			};
 
 		} catch (error) {
 			logger.log('ERROR', 'Error checking user credits', {
@@ -528,7 +427,294 @@ export class FaxDatabaseUtils {
 				hasCredits: false,
 				error: error.message,
 				availablePages: 0,
-				subscriptionId: null
+				subscriptionId: null,
+				creditSource: null
+			};
+		}
+	}
+
+	/**
+	 * Check if user is a paid subscriber (not freemium)
+	 * @param {string} userId - User ID
+	 * @param {Object} env - Environment variables
+	 * @param {Object} logger - Logger instance
+	 * @returns {Promise<boolean>} True if user is a paid subscriber
+	 */
+	static async isUserPaidSubscriber(userId, env, logger) {
+		try {
+			const supabase = this.getSupabaseAdminClient(env);
+
+			const { data, error } = await supabase
+				.from('user_subscriptions')
+				.select(`
+					id,
+					product_id,
+					products!inner(type)
+				`)
+				.eq('user_id', userId)
+				.eq('is_active', true)
+				.neq('product_id', 'freemium_monthly')
+				.or('expires_at.is.null,expires_at.gt.now()')
+				.limit(1);
+
+			if (error) {
+				logger.log('ERROR', 'Failed to check paid subscriber status', {
+					error: error.message,
+					userId: userId
+				});
+				return false;
+			}
+
+			// Filter for subscription type products only
+			const paidSubscriptions = (data || []).filter(sub => 
+				sub.products?.type === 'subscription'
+			);
+
+			return paidSubscriptions.length > 0;
+
+		} catch (error) {
+			logger.log('ERROR', 'Error checking paid subscriber status', {
+				error: error.message,
+				userId: userId
+			});
+			return false;
+		}
+	}
+
+	/**
+	 * Check subscription credits for paid users
+	 * @param {string} userId - User ID
+	 * @param {number} pagesRequired - Number of pages required
+	 * @param {Object} env - Environment variables
+	 * @param {Object} logger - Logger instance
+	 * @returns {Promise<Object>} Credit check result
+	 */
+	static async checkSubscriptionCredits(userId, pagesRequired, env, logger) {
+		const supabase = this.getSupabaseAdminClient(env);
+
+		// Get user's active subscriptions (excluding freemium)
+		const { data: allSubscriptions, error: subError } = await supabase
+			.from('user_subscriptions')
+			.select(`
+				id,
+				product_id,
+				credit_limit,
+				credits_used,
+				expires_at,
+				billing_period_start,
+				billing_period_end,
+				is_active,
+				products!inner(type)
+			`)
+			.eq('user_id', userId)
+			.eq('is_active', true)
+			.neq('product_id', 'freemium_monthly')
+			.order('created_at', { ascending: false });
+
+		if (subError) {
+			logger.log('ERROR', 'Failed to fetch user subscriptions', {
+				error: subError.message,
+				userId: userId
+			});
+			return {
+				hasCredits: false,
+				error: 'Failed to check user credits',
+				availablePages: 0,
+				subscriptionId: null,
+				creditSource: 'subscription'
+			};
+		}
+
+		// Filter subscriptions by expiration and billing period
+		const now = new Date();
+		const subscriptions = (allSubscriptions || []).filter(sub => {
+			if (sub.expires_at) {
+				const expiresAt = new Date(sub.expires_at);
+				if (expiresAt <= now) return false;
+			}
+			if (sub.billing_period_end) {
+				const periodEnd = new Date(sub.billing_period_end);
+				if (periodEnd < now) return false;
+			}
+			return true;
+		});
+
+		if (!subscriptions || subscriptions.length === 0) {
+			return {
+				hasCredits: false,
+				error: 'No active paid subscriptions found',
+				availablePages: 0,
+				subscriptionId: null,
+				creditSource: 'subscription'
+			};
+		}
+
+		// Calculate total available credits
+		let totalAvailablePages = 0;
+		let primarySubscription = null;
+
+		for (const subscription of subscriptions) {
+			let isWithinBillingPeriod = true;
+			
+			if (subscription.billing_period_start && subscription.billing_period_end) {
+				const periodStart = new Date(subscription.billing_period_start);
+				const periodEnd = new Date(subscription.billing_period_end);
+				isWithinBillingPeriod = now >= periodStart && now <= periodEnd;
+			}
+
+			if (!isWithinBillingPeriod) continue;
+
+			const availableCredits = subscription.credit_limit - subscription.credits_used;
+			if (availableCredits > 0) {
+				totalAvailablePages += availableCredits;
+				if (!primarySubscription) {
+					primarySubscription = subscription;
+				}
+			}
+		}
+
+		const hasCredits = totalAvailablePages >= pagesRequired;
+
+		logger.log('INFO', 'Subscription credit check completed', {
+			userId: userId,
+			pagesRequired: pagesRequired,
+			totalAvailablePages: totalAvailablePages,
+			hasCredits: hasCredits,
+			subscriptionCount: subscriptions.length,
+			creditSource: 'subscription'
+		});
+
+		return {
+			hasCredits: hasCredits,
+			availablePages: totalAvailablePages,
+			subscriptionId: primarySubscription?.id || null,
+			subscriptions: subscriptions,
+			creditSource: 'subscription',
+			error: null
+		};
+	}
+
+	/**
+	 * Check free credits for non-paid users
+	 * @param {string} userId - User ID
+	 * @param {number} pagesRequired - Number of pages required
+	 * @param {Object} env - Environment variables
+	 * @param {Object} logger - Logger instance
+	 * @returns {Promise<Object>} Credit check result
+	 */
+	static async checkFreeCredits(userId, pagesRequired, env, logger) {
+		const supabase = this.getSupabaseAdminClient(env);
+
+		// Get user's active free credits (ordered by expiry for FIFO consumption)
+		const { data: freeCredits, error: creditsError } = await supabase
+			.from('free_credits')
+			.select('id, type, credit_limit, credits_used, expires_at')
+			.eq('user_id', userId)
+			.eq('is_active', true)
+			.gt('expires_at', new Date().toISOString())
+			.order('expires_at', { ascending: true });
+
+		if (creditsError) {
+			logger.log('ERROR', 'Failed to fetch free credits', {
+				error: creditsError.message,
+				userId: userId
+			});
+			return {
+				hasCredits: false,
+				error: 'Failed to check free credits',
+				availablePages: 0,
+				subscriptionId: null,
+				creditSource: 'free_credits'
+			};
+		}
+
+		// Calculate total available free credits
+		let totalAvailablePages = 0;
+		const activeCredits = [];
+
+		for (const credit of (freeCredits || [])) {
+			const available = credit.credit_limit - credit.credits_used;
+			if (available > 0) {
+				totalAvailablePages += available;
+				activeCredits.push(credit);
+			}
+		}
+
+		const hasCredits = totalAvailablePages >= pagesRequired;
+
+		logger.log('INFO', 'Free credit check completed', {
+			userId: userId,
+			pagesRequired: pagesRequired,
+			totalAvailablePages: totalAvailablePages,
+			hasCredits: hasCredits,
+			freeCreditRecords: activeCredits.length,
+			creditSource: 'free_credits'
+		});
+
+		return {
+			hasCredits: hasCredits,
+			availablePages: totalAvailablePages,
+			subscriptionId: null,
+			freeCredits: activeCredits,
+			creditSource: 'free_credits',
+			error: hasCredits ? null : 'Insufficient free credits'
+		};
+	}
+
+	/**
+	 * Consume free credits from user (FIFO by expiry date)
+	 * @param {string} userId - User ID
+	 * @param {number} amount - Amount of credits to consume
+	 * @param {Object} env - Environment variables
+	 * @param {Object} logger - Logger instance
+	 * @param {string} referenceId - Optional reference ID (e.g., fax ID)
+	 * @returns {Promise<Object>} Consumption result
+	 */
+	static async consumeFreeCredits(userId, amount, env, logger, referenceId = null) {
+		try {
+			const supabase = this.getSupabaseAdminClient(env);
+
+			// Call the database function to consume credits
+			const { data, error } = await supabase
+				.rpc('consume_free_credits', {
+					p_user_id: userId,
+					p_amount: amount,
+					p_reference_id: referenceId,
+					p_metadata: { consumed_at: new Date().toISOString() }
+				});
+
+			if (error) {
+				logger.log('ERROR', 'Failed to consume free credits', {
+					error: error.message,
+					userId: userId,
+					amount: amount
+				});
+				return {
+					success: false,
+					error: error.message
+				};
+			}
+
+			logger.log('INFO', 'Free credits consumed successfully', {
+				userId: userId,
+				amount: amount,
+				success: data
+			});
+
+			return {
+				success: data === true,
+				error: data === true ? null : 'Insufficient free credits'
+			};
+
+		} catch (error) {
+			logger.log('ERROR', 'Error consuming free credits', {
+				error: error.message,
+				userId: userId,
+				amount: amount
+			});
+			return {
+				success: false,
+				error: error.message
 			};
 		}
 	}
