@@ -235,17 +235,28 @@ SET search_path = public;
 -- ============================================================================
 -- Trigger: Auto-grant signup bonus on new user creation
 -- ============================================================================
-CREATE OR REPLACE FUNCTION public.handle_new_user_signup_credits()
-RETURNS TRIGGER AS $$
+REATE OR REPLACE FUNCTION public.handle_new_user_signup_credits()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO public
+AS $$
+DECLARE
+  credit_id uuid;
 BEGIN
-    PERFORM public.grant_signup_bonus(NEW.id);
-    RETURN NEW;
-EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'Failed to grant signup bonus: %', SQLERRM;
+  RAISE LOG 'signup trigger start user_id=%', NEW.id;
+
+  credit_id := public.grant_signup_bonus(NEW.id);
+
+  RAISE LOG 'signup trigger done user_id=% credit_id=%', NEW.id, credit_id;
+  RETURN NEW;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE WARNING 'signup trigger failed user_id=% error=%', NEW.id, SQLERRM;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = public;
+$$;
 
 DROP TRIGGER IF EXISTS trigger_grant_signup_bonus ON auth.users;
 CREATE TRIGGER trigger_grant_signup_bonus
