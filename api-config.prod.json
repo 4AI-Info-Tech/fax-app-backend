@@ -261,6 +261,36 @@
         },
         {
             "method": "GET",
+            "path": "/v1/usage/summary",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "usageSummary"
+            },
+            "auth": true
+        },
+        {
+            "method": "POST",
+            "path": "/v1/account/delete",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "scheduleAccountDeletion"
+            },
+            "auth": true
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/account/delete",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "cancelAccountDeletion"
+            },
+            "auth": true
+        },
+        {
+            "method": "GET",
             "path": "/v1/admob/ssv",
             "integration": {
                 "type": "service_binding",

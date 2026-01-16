@@ -28,6 +28,10 @@
             "binding": "REVENUECAT_SERVICE"
         },
         {
+            "alias": "management_service",
+            "binding": "MANAGEMENT_SERVICE"
+        },
+        {
             "alias": "admob_service",
             "binding": "ADMOB_SERVICE"
         }
@@ -203,6 +207,36 @@
                 "type": "service_binding",
                 "binding": "revenuecat_service",
                 "function": "health"
+            },
+            "auth": true
+        },
+        {
+            "method": "GET",
+            "path": "/v1/usage/summary",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "usageSummary"
+            },
+            "auth": true
+        },
+        {
+            "method": "POST",
+            "path": "/v1/account/delete",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "scheduleAccountDeletion"
+            },
+            "auth": true
+        },
+        {
+            "method": "DELETE",
+            "path": "/v1/account/delete",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "cancelAccountDeletion"
             },
             "auth": true
         },

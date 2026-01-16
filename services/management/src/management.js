@@ -322,6 +322,218 @@ export default class extends WorkerEntrypoint {
 	 * GET /v1/usage/summary?period=daily|weekly|monthly|all_time
 	 * _Requirements: 13.1, 13.2, 13.3_
 	 */
+	/**
+	 * Schedule account deletion (7 days from now)
+	 * POST /v1/account/delete
+	 * User can cancel within the 7-day period
+	 */
+	async scheduleAccountDeletion(request, caller_env = "{}", sagContext = "{}") {
+		this.logger.log('INFO', 'Account deletion scheduling requested');
+		
+		try {
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
+			
+			// Get user ID from JWT
+			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
+			
+			if (!userId) {
+				return new Response(JSON.stringify({
+					statusCode: 401,
+					error: 'Unauthorized',
+					message: 'Authentication required'
+				}), {
+					status: 401,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+
+			// Call database function to schedule deletion
+			const result = await DatabaseUtils.scheduleUserDeletion(userId, this.env, this.logger);
+			
+			if (!result.success) {
+				return new Response(JSON.stringify({
+					statusCode: 400,
+					error: 'Bad Request',
+					message: result.message
+				}), {
+					status: 400,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+
+			this.logger.log('INFO', 'Account deletion scheduled successfully', {
+				userId,
+				scheduledAt: result.scheduledAt
+			});
+
+			return new Response(JSON.stringify({
+				statusCode: 200,
+				message: result.message,
+				data: {
+					scheduledAt: result.scheduledAt,
+					daysUntilDeletion: 7
+				}
+			}), {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*'
+				}
+			});
+		} catch (error) {
+			this.logger.log('ERROR', `Account deletion scheduling failed: ${error.message}`);
+			return new Response(JSON.stringify({
+				statusCode: 500,
+				error: 'Internal Server Error',
+				message: error.message
+			}), {
+				status: 500,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*'
+				}
+			});
+		}
+	}
+
+	/**
+	 * Cancel scheduled account deletion
+	 * DELETE /v1/account/delete
+	 */
+	async cancelAccountDeletion(request, caller_env = "{}", sagContext = "{}") {
+		this.logger.log('INFO', 'Account deletion cancellation requested');
+		
+		try {
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
+			
+			// Get user ID from JWT
+			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
+			
+			if (!userId) {
+				return new Response(JSON.stringify({
+					statusCode: 401,
+					error: 'Unauthorized',
+					message: 'Authentication required'
+				}), {
+					status: 401,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+
+			// Call database function to cancel deletion
+			const result = await DatabaseUtils.cancelUserDeletion(userId, this.env, this.logger);
+			
+			if (!result.success) {
+				return new Response(JSON.stringify({
+					statusCode: 400,
+					error: 'Bad Request',
+					message: result.message
+				}), {
+					status: 400,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+
+			this.logger.log('INFO', 'Account deletion cancelled successfully', { userId });
+
+			return new Response(JSON.stringify({
+				statusCode: 200,
+				message: result.message
+			}), {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*'
+				}
+			});
+		} catch (error) {
+			this.logger.log('ERROR', `Account deletion cancellation failed: ${error.message}`);
+			return new Response(JSON.stringify({
+				statusCode: 500,
+				error: 'Internal Server Error',
+				message: error.message
+			}), {
+				status: 500,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*'
+				}
+			});
+		}
+	}
+
+	/**
+	 * Get account deletion status
+	 * GET /v1/account/delete
+	 */
+	async getAccountDeletionStatus(request, caller_env = "{}", sagContext = "{}") {
+		this.logger.log('INFO', 'Account deletion status requested');
+		
+		try {
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
+			
+			// Get user ID from JWT
+			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
+			
+			if (!userId) {
+				return new Response(JSON.stringify({
+					statusCode: 401,
+					error: 'Unauthorized',
+					message: 'Authentication required'
+				}), {
+					status: 401,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+
+			// Get deletion status
+			const status = await DatabaseUtils.getUserDeletionStatus(userId, this.env, this.logger);
+
+			return new Response(JSON.stringify({
+				statusCode: 200,
+				message: 'Deletion status retrieved',
+				data: status
+			}), {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*'
+				}
+			});
+		} catch (error) {
+			this.logger.log('ERROR', `Account deletion status failed: ${error.message}`);
+			return new Response(JSON.stringify({
+				statusCode: 500,
+				error: 'Internal Server Error',
+				message: error.message
+			}), {
+				status: 500,
+				headers: {
+					'Content-Type': 'application/json',
+					'Access-Control-Allow-Origin': '*'
+				}
+			});
+		}
+	}
+
 	async usageSummary(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Usage summary requested');
 		

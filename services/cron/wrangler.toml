@@ -21,6 +21,7 @@ head_sampling_rate = 1
 [env.staging.triggers]
 crons = [
 	"* * * * *",  # Every minute - fax status polling
+	"0 0 * * *",  # Daily at midnight - credit reset + user anonymization
 ]
 
 [env.prod]
@@ -39,5 +40,6 @@ SUPABASE_URL = "https://qgzzpufyjczgvvggvrhh.supabase.co"
 [env.prod.triggers]
 crons = [
 	"* * * * *",  # Every minute - fax status polling
+	"0 0 * * *",  # Daily at midnight - credit reset + user anonymization
 ]
 

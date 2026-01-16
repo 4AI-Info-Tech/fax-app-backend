@@ -32,6 +32,11 @@ export default {
 			} else if (cronExpression === '0 0 * * *') {
 				// Daily at midnight - reset monthly credits for annual subscriptions
 				await handleMonthlyCreditReset(env, logger);
+				// Also process scheduled user anonymizations
+				await handleUserAnonymization(env, logger);
+			} else if (cronExpression === '0 */6 * * *') {
+				// Every 6 hours - process scheduled user anonymizations
+				await handleUserAnonymization(env, logger);
 			} else {
 				logger.log('WARN', 'Unknown cron schedule', { cronExpression });
 			}
@@ -100,6 +105,19 @@ export default {
 				await handleMonthlyCreditReset(env, logger);
 				return new Response(JSON.stringify({
 					message: 'Monthly credit reset completed',
+					timestamp: new Date().toISOString()
+				}), {
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+
+			if (url.pathname === '/trigger/anonymize-users') {
+				// Manual trigger for user anonymization
+				logger.log('INFO', 'Manual user anonymization trigger received');
+				const result = await handleUserAnonymization(env, logger);
+				return new Response(JSON.stringify({
+					message: 'User anonymization completed',
+					result,
 					timestamp: new Date().toISOString()
 				}), {
 					headers: { 'Content-Type': 'application/json' }
@@ -364,5 +382,175 @@ async function handleMonthlyCreditReset(env, logger) {
 			error: error.message,
 			stack: error.stack
 		});
+	}
+}
+
+/**
+ * Handle user anonymization - process users whose scheduled deletion time has passed
+ * This function:
+ * 1. Finds users with scheduled_deletion_at <= NOW() and is_anonymized = false
+ * 2. For each user, anonymizes their data (deletes contacts, nullifies fax user_id)
+ * 3. Marks the profile as anonymized
+ * 4. Deletes the auth user
+ * @param {object} env - Environment variables
+ * @param {Logger} logger - Logger instance
+ * @returns {object} Results of the anonymization process
+ */
+async function handleUserAnonymization(env, logger) {
+	logger.log('INFO', 'Starting scheduled user anonymization');
+
+	try {
+		if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+			logger.log('ERROR', 'Supabase not configured for user anonymization');
+			return { success: false, processed: 0, message: 'Supabase not configured' };
+		}
+
+		const { createClient } = await import('@supabase/supabase-js');
+		const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+			auth: {
+				autoRefreshToken: false,
+				persistSession: false
+			}
+		});
+
+		// Find users scheduled for deletion whose time has passed
+		const { data: usersToAnonymize, error: fetchError } = await supabase
+			.from('profiles')
+			.select('id, scheduled_deletion_at')
+			.eq('is_anonymized', false)
+			.not('scheduled_deletion_at', 'is', null)
+			.lte('scheduled_deletion_at', new Date().toISOString());
+
+		if (fetchError) {
+			logger.log('ERROR', 'Failed to fetch users for anonymization', {
+				error: fetchError.message
+			});
+			return { success: false, processed: 0, message: fetchError.message };
+		}
+
+		if (!usersToAnonymize || usersToAnonymize.length === 0) {
+			logger.log('INFO', 'No users scheduled for anonymization');
+			return { success: true, processed: 0, message: 'No users to anonymize' };
+		}
+
+		logger.log('INFO', 'Found users scheduled for anonymization', {
+			count: usersToAnonymize.length
+		});
+
+		let successCount = 0;
+		let errorCount = 0;
+		const results = [];
+
+		// Process each user
+		for (const user of usersToAnonymize) {
+			try {
+				logger.log('INFO', 'Anonymizing user', { userId: user.id });
+
+				// Call the database function to anonymize user data
+				const { data: anonymizeResult, error: anonymizeError } = await supabase
+					.rpc('anonymize_user', { p_user_id: user.id });
+
+				if (anonymizeError) {
+					logger.log('ERROR', 'Failed to anonymize user data', {
+						userId: user.id,
+						error: anonymizeError.message
+					});
+					errorCount++;
+					results.push({
+						userId: user.id,
+						success: false,
+						error: anonymizeError.message
+					});
+					continue;
+				}
+
+				const result = anonymizeResult?.[0] || {};
+
+				if (!result.success) {
+					logger.log('ERROR', 'User anonymization returned failure', {
+						userId: user.id,
+						message: result.message
+					});
+					errorCount++;
+					results.push({
+						userId: user.id,
+						success: false,
+						error: result.message
+					});
+					continue;
+				}
+
+				// Delete the auth user after successful data anonymization
+				const { error: deleteError } = await supabase.auth.admin.deleteUser(user.id);
+
+				if (deleteError) {
+					logger.log('ERROR', 'Failed to delete auth user after anonymization', {
+						userId: user.id,
+						error: deleteError.message
+					});
+					// Data is already anonymized, so we count this as partial success
+					results.push({
+						userId: user.id,
+						success: true,
+						authDeleted: false,
+						contactsDeleted: result.contacts_deleted,
+						faxesAnonymized: result.faxes_anonymized,
+						error: `Auth deletion failed: ${deleteError.message}`
+					});
+					successCount++;
+				} else {
+					logger.log('INFO', 'User fully anonymized and deleted', {
+						userId: user.id,
+						contactsDeleted: result.contacts_deleted,
+						faxesAnonymized: result.faxes_anonymized,
+						subscriptionsDeleted: result.subscriptions_deleted,
+						freeCreditsDeleted: result.free_credits_deleted
+					});
+					results.push({
+						userId: user.id,
+						success: true,
+						authDeleted: true,
+						contactsDeleted: result.contacts_deleted,
+						faxesAnonymized: result.faxes_anonymized,
+						subscriptionsDeleted: result.subscriptions_deleted,
+						freeCreditsDeleted: result.free_credits_deleted
+					});
+					successCount++;
+				}
+
+			} catch (error) {
+				logger.log('ERROR', 'Error processing user anonymization', {
+					userId: user.id,
+					error: error.message
+				});
+				errorCount++;
+				results.push({
+					userId: user.id,
+					success: false,
+					error: error.message
+				});
+			}
+		}
+
+		logger.log('INFO', 'User anonymization completed', {
+			totalProcessed: usersToAnonymize.length,
+			successCount,
+			errorCount
+		});
+
+		return {
+			success: true,
+			processed: usersToAnonymize.length,
+			successCount,
+			errorCount,
+			results
+		};
+
+	} catch (error) {
+		logger.log('ERROR', 'Error in user anonymization', {
+			error: error.message,
+			stack: error.stack
+		});
+		return { success: false, processed: 0, message: error.message };
 	}
 }

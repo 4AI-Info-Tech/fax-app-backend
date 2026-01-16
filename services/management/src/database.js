@@ -380,4 +380,265 @@ export class DatabaseUtils {
 			return [];
 		}
 	}
+
+	/**
+	 * Schedule user account for deletion (7 days from now)
+	 * @param {string} userId - User ID
+	 * @param {Object} env - Environment variables
+	 * @param {Logger} logger - Logger instance
+	 * @returns {Object} Result with success status and scheduled date
+	 */
+	static async scheduleUserDeletion(userId, env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot schedule user deletion');
+				return { success: false, message: 'Database not configured' };
+			}
+
+			const supabase = this.getSupabaseAdminClient(env);
+
+			const { data, error } = await supabase
+				.rpc('schedule_user_deletion', { p_user_id: userId });
+
+			if (error) {
+				logger.log('ERROR', 'Failed to schedule user deletion', {
+					error: error.message,
+					code: error.code,
+					userId
+				});
+				return { success: false, message: error.message };
+			}
+
+			if (!data || data.length === 0) {
+				return { success: false, message: 'No result from database function' };
+			}
+
+			const result = data[0];
+			logger.log('INFO', 'User deletion scheduled', {
+				userId,
+				success: result.success,
+				scheduledAt: result.scheduled_at,
+				message: result.message
+			});
+
+			return {
+				success: result.success,
+				scheduledAt: result.scheduled_at,
+				message: result.message
+			};
+
+		} catch (error) {
+			logger.log('ERROR', 'Error scheduling user deletion', {
+				error: error.message,
+				userId
+			});
+			return { success: false, message: error.message };
+		}
+	}
+
+	/**
+	 * Cancel scheduled user account deletion
+	 * @param {string} userId - User ID
+	 * @param {Object} env - Environment variables
+	 * @param {Logger} logger - Logger instance
+	 * @returns {Object} Result with success status
+	 */
+	static async cancelUserDeletion(userId, env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot cancel user deletion');
+				return { success: false, message: 'Database not configured' };
+			}
+
+			const supabase = this.getSupabaseAdminClient(env);
+
+			const { data, error } = await supabase
+				.rpc('cancel_user_deletion', { p_user_id: userId });
+
+			if (error) {
+				logger.log('ERROR', 'Failed to cancel user deletion', {
+					error: error.message,
+					code: error.code,
+					userId
+				});
+				return { success: false, message: error.message };
+			}
+
+			if (!data || data.length === 0) {
+				return { success: false, message: 'No result from database function' };
+			}
+
+			const result = data[0];
+			logger.log('INFO', 'User deletion cancellation result', {
+				userId,
+				success: result.success,
+				message: result.message
+			});
+
+			return {
+				success: result.success,
+				message: result.message
+			};
+
+		} catch (error) {
+			logger.log('ERROR', 'Error cancelling user deletion', {
+				error: error.message,
+				userId
+			});
+			return { success: false, message: error.message };
+		}
+	}
+
+	/**
+	 * Get user account deletion status
+	 * @param {string} userId - User ID
+	 * @param {Object} env - Environment variables
+	 * @param {Logger} logger - Logger instance
+	 * @returns {Object} Deletion status
+	 */
+	static async getUserDeletionStatus(userId, env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot get deletion status');
+				return { isScheduled: false, isAnonymized: false };
+			}
+
+			const supabase = this.getSupabaseAdminClient(env);
+
+			const { data, error } = await supabase
+				.rpc('get_user_deletion_status', { p_user_id: userId });
+
+			if (error) {
+				logger.log('ERROR', 'Failed to get user deletion status', {
+					error: error.message,
+					code: error.code,
+					userId
+				});
+				return { isScheduled: false, isAnonymized: false, error: error.message };
+			}
+
+			if (!data || data.length === 0) {
+				return { isScheduled: false, isAnonymized: false };
+			}
+
+			const result = data[0];
+			logger.log('INFO', 'User deletion status retrieved', {
+				userId,
+				isScheduled: result.is_scheduled,
+				scheduledAt: result.scheduled_at,
+				isAnonymized: result.is_anonymized,
+				daysRemaining: result.days_remaining
+			});
+
+			return {
+				isScheduled: result.is_scheduled,
+				scheduledAt: result.scheduled_at,
+				isAnonymized: result.is_anonymized,
+				daysRemaining: result.days_remaining
+			};
+
+		} catch (error) {
+			logger.log('ERROR', 'Error getting user deletion status', {
+				error: error.message,
+				userId
+			});
+			return { isScheduled: false, isAnonymized: false, error: error.message };
+		}
+	}
+
+	/**
+	 * Process all scheduled anonymizations (for cron job)
+	 * @param {Object} env - Environment variables
+	 * @param {Logger} logger - Logger instance
+	 * @returns {Object} Processing results
+	 */
+	static async processScheduledAnonymizations(env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot process anonymizations');
+				return { success: false, processed: 0, message: 'Database not configured' };
+			}
+
+			const supabase = this.getSupabaseAdminClient(env);
+
+			const { data, error } = await supabase
+				.rpc('process_scheduled_anonymizations');
+
+			if (error) {
+				logger.log('ERROR', 'Failed to process scheduled anonymizations', {
+					error: error.message,
+					code: error.code
+				});
+				return { success: false, processed: 0, message: error.message };
+			}
+
+			const results = data || [];
+			const successCount = results.filter(r => r.success).length;
+			const failedCount = results.filter(r => !r.success).length;
+
+			logger.log('INFO', 'Scheduled anonymizations processed', {
+				totalProcessed: results.length,
+				successCount,
+				failedCount,
+				results: results.map(r => ({
+					userId: r.user_id,
+					success: r.success,
+					contactsDeleted: r.contacts_deleted,
+					faxesAnonymized: r.faxes_anonymized
+				}))
+			});
+
+			return {
+				success: true,
+				processed: results.length,
+				successCount,
+				failedCount,
+				results
+			};
+
+		} catch (error) {
+			logger.log('ERROR', 'Error processing scheduled anonymizations', {
+				error: error.message
+			});
+			return { success: false, processed: 0, message: error.message };
+		}
+	}
+
+	/**
+	 * Delete auth user after anonymization
+	 * @param {string} userId - User ID to delete
+	 * @param {Object} env - Environment variables
+	 * @param {Logger} logger - Logger instance
+	 * @returns {Object} Deletion result
+	 */
+	static async deleteAuthUser(userId, env, logger) {
+		try {
+			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+				logger.log('WARN', 'Supabase not configured, cannot delete auth user');
+				return { success: false, message: 'Database not configured' };
+			}
+
+			const supabase = this.getSupabaseAdminClient(env);
+
+			const { error } = await supabase.auth.admin.deleteUser(userId);
+
+			if (error) {
+				logger.log('ERROR', 'Failed to delete auth user', {
+					error: error.message,
+					userId
+				});
+				return { success: false, message: error.message };
+			}
+
+			logger.log('INFO', 'Auth user deleted successfully', { userId });
+			return { success: true };
+
+		} catch (error) {
+			logger.log('ERROR', 'Error deleting auth user', {
+				error: error.message,
+				userId
+			});
+			return { success: false, message: error.message };
+		}
+	}
 } 
