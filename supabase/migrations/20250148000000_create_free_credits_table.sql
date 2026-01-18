@@ -235,7 +235,7 @@ SET search_path = public;
 -- ============================================================================
 -- Trigger: Auto-grant signup bonus on new user creation
 -- ============================================================================
-REATE OR REPLACE FUNCTION public.handle_new_user_signup_credits()
+CREATE OR REPLACE FUNCTION public.handle_new_user_signup_credits()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
