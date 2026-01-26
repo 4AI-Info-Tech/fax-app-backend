@@ -4,7 +4,8 @@
 export class Logger {
 	constructor(env) {
 		this.env = env;
-		this.logLevel = env?.LOG_LEVEL || 'INFO';
+		// Temporarily defaulting to DEBUG for troubleshooting SSV verification
+		this.logLevel = env?.LOG_LEVEL || 'DEBUG';
 	}
 
 	log(level, message, data = null) {
@@ -45,14 +46,14 @@ export class AdMobKeyManager {
 		}
 
 		logger?.log('INFO', 'Fetching AdMob public keys from Google');
-		
+
 		const response = await fetch(this.KEYS_URL);
 		if (!response.ok) {
 			throw new Error(`Failed to fetch AdMob keys: ${response.status}`);
 		}
 
 		const data = await response.json();
-		
+
 		// Parse keys into a map
 		const keys = {};
 		for (const key of data.keys) {

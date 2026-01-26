@@ -37,7 +37,9 @@ export default class extends WorkerEntrypoint {
 	 */
 	async ssvCallback(request, caller_env, sagContext) {
 		try {
+			this.logger.log('INFO', '========================================');
 			this.logger.log('INFO', 'AdMob SSV callback received');
+			this.logger.log('INFO', '========================================');
 
 			// Parse environment
 			const callerEnvObj = typeof caller_env === 'string'
@@ -46,23 +48,40 @@ export default class extends WorkerEntrypoint {
 
 			// Get the full URL for verification
 			const url = request.url;
-			this.logger.log('DEBUG', 'Full request URL', { url });
+			const parsedUrl = new URL(url);
+
+			this.logger.log('INFO', 'Request details', {
+				method: request.method,
+				fullUrl: url,
+				origin: parsedUrl.origin,
+				pathname: parsedUrl.pathname,
+				search: parsedUrl.search,
+				searchLength: parsedUrl.search.length
+			});
+
 			this.logger.log('DEBUG', 'Request headers', {
 				headers: Object.fromEntries(request.headers.entries())
 			});
-			this.logger.log('DEBUG', 'Caller env keys', {
+
+			this.logger.log('DEBUG', 'Caller env configuration', {
 				keys: Object.keys(callerEnvObj),
-				skipVerification: callerEnvObj.ADMOB_SKIP_VERIFICATION
+				skipVerification: callerEnvObj.ADMOB_SKIP_VERIFICATION,
+				logLevel: callerEnvObj.LOG_LEVEL
 			});
 
 			// Parse callback parameters
 			const params = parseAdMobCallback(url);
-			this.logger.log('DEBUG', 'Parsed SSV parameters', {
+			this.logger.log('INFO', 'Parsed SSV parameters', {
+				adNetwork: params.adNetwork,
 				adUnit: params.adUnit,
 				transactionId: params.transactionId,
 				userId: params.userId,
 				rewardAmount: params.rewardAmount,
-				rewardItem: params.rewardItem
+				rewardItem: params.rewardItem,
+				timestamp: params.timestamp,
+				keyId: params.keyId,
+				hasSignature: !!params.signature,
+				signatureLength: params.signature?.length
 			});
 
 			// Validate required parameters
@@ -164,13 +183,13 @@ export default class extends WorkerEntrypoint {
 			this.logger.log('INFO', 'SSV callback processed successfully', {
 				transactionId: params.transactionId,
 				userId: params.userId,
-				pagesGranted: result.pagesGranted
+				creditsGranted: result.creditsGranted
 			});
 
 			return new Response(JSON.stringify({
 				success: true,
 				transactionId: params.transactionId,
-				pagesGranted: result.pagesGranted
+				creditsGranted: result.creditsGranted
 			}), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' }
