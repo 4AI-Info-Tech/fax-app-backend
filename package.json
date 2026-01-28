@@ -3,8 +3,9 @@
     "wrangler": "^4.23.0"
   },
   "dependencies": {
-    "jsonwebtoken": "^9.0.2",
+    "@sentry/cloudflare": "^10.37.0",
+    "@supabase/supabase-js": "^2.50.2",
     "jose": "^6.0.11",
-    "@supabase/supabase-js": "^2.50.2"
+    "jsonwebtoken": "^9.0.2"
   }
 }
