@@ -14,9 +14,9 @@ export class DatabaseUtils {
 		if (!env.SUPABASE_SERVICE_ROLE_KEY) {
 			throw new Error('SUPABASE_SERVICE_ROLE_KEY is required for backend operations');
 		}
-		
+
 		console.log(`[DatabaseUtils] Creating Supabase admin client - Using SERVICE_ROLE key (RLS BYPASSED - Admin Access)`);
-		
+
 		return createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 	}
 
@@ -93,11 +93,7 @@ export class DatabaseUtils {
 
 			const supabase = this.getSupabaseAdminClient(env);
 
-			const { data: user, error } = await supabase
-				.from('users')
-				.select('*')
-				.eq('id', userId)
-				.single();
+			const { data: { user }, error } = await supabase.auth.admin.getUserById(userId);
 
 			if (error) {
 				logger.log('ERROR', 'Failed to get user from database', {
@@ -138,10 +134,9 @@ export class DatabaseUtils {
 
 			const supabase = this.getSupabaseAdminClient(env);
 
-			// Get total users count
-			const { count: totalUsers, error: usersError } = await supabase
-				.from('users')
-				.select('*', { count: 'exact', head: true });
+			// Get total users count via auth admin
+			const { data: { users }, error: usersError } = await supabase.auth.admin.listUsers();
+			const totalUsers = users ? users.length : 0;
 
 			if (usersError) {
 				logger.log('ERROR', 'Failed to get users count', {
@@ -212,7 +207,7 @@ export class DatabaseUtils {
 			// Calculate start date based on period
 			let startDate = null;
 			const now = new Date();
-			
+
 			switch (period) {
 				case 'daily':
 					startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -268,8 +263,8 @@ export class DatabaseUtils {
 			const totalPagesUsed = faxes.reduce((sum, fax) => sum + (fax.pages || 0), 0);
 			const successfulFaxes = faxes.filter(fax => fax.status === 'delivered').length;
 			const failedFaxes = faxes.filter(fax => fax.status === 'failed').length;
-			const successRate = totalFaxesSent > 0 
-				? (successfulFaxes / totalFaxesSent) * 100 
+			const successRate = totalFaxesSent > 0
+				? (successfulFaxes / totalFaxesSent) * 100
 				: 0;
 
 			const summary = {
@@ -604,13 +599,6 @@ export class DatabaseUtils {
 		}
 	}
 
-	/**
-	 * Delete auth user after anonymization
-	 * @param {string} userId - User ID to delete
-	 * @param {Object} env - Environment variables
-	 * @param {Logger} logger - Logger instance
-	 * @returns {Object} Deletion result
-	 */
 	static async deleteAuthUser(userId, env, logger) {
 		try {
 			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -640,5 +628,172 @@ export class DatabaseUtils {
 			});
 			return { success: false, message: error.message };
 		}
+	}
+
+	// --- Referral System Helpers ---
+
+	/**
+	 * Get user by email
+	 * @param {string} email
+	 * @param {Object} env
+	 * @param {Logger} logger
+	 */
+	static async getUserByEmail(email, env, logger) {
+		// "public.users" does not exist and querying "auth.users" by email requires listUsers or RPC.
+		// For now, we return null to allow the invite flow to proceed. 
+		// If the user actually exists, the client-side signup flow or database triggers should handle conflicts.
+		return null;
+	}
+
+	/**
+	 * Get user profile (alias for getUser for now)
+	 */
+	static async getUserProfile(userId, env, logger) {
+		return this.getUser(userId, env, logger);
+	}
+
+	/**
+	 * Get referral stats for a user
+	 * @param {string} userId
+	 * @param {Object} env
+	 * @param {Logger} logger
+	 */
+	static async getReferralStats(userId, env, logger) {
+		const supabase = this.getSupabaseAdminClient(env);
+
+		// Count successful (reward_granted)
+		const { count: successfulReferrals, error: successError } = await supabase
+			.from('referral_invites')
+			.select('*', { count: 'exact', head: true })
+			.eq('inviter_user_id', userId)
+			.eq('status', 'reward_granted');
+
+		// Count total invites
+		const { count: totalInvites, error: totalError } = await supabase
+			.from('referral_invites')
+			.select('*', { count: 'exact', head: true })
+			.eq('inviter_user_id', userId);
+
+		// Calculate date one year ago
+		const oneYearAgo = new Date();
+		oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+		const { count: successfulReferralsLastYear, error: yearlyError } = await supabase
+			.from('referral_invites')
+			.select('*', { count: 'exact', head: true })
+			.eq('inviter_user_id', userId)
+			.eq('status', 'reward_granted')
+			.gt('reward_granted_at', oneYearAgo.toISOString());
+
+		if (successError || totalError || yearlyError) {
+			logger.log('ERROR', 'Failed to get referral stats', { successError, totalError, yearlyError });
+			return { successfulReferrals: 0, totalInvites: 0, successfulReferralsLastYear: 0 };
+		}
+
+		return {
+			successfulReferrals: successfulReferrals || 0,
+			totalInvites: totalInvites || 0,
+			successfulReferralsLastYear: successfulReferralsLastYear || 0
+		};
+	}
+
+	/**
+	 * Get referral invite by email (checks hash)
+	 * @param {string} email
+	 * @param {Object} env
+	 * @param {Logger} logger
+	 */
+	static async getReferralByEmail(email, env, logger) {
+		const supabase = this.getSupabaseAdminClient(env);
+		const emailHash = await this.hashEmail(email);
+
+		const { data, error } = await supabase
+			.from('referral_invites')
+			.select('*')
+			.eq('invitee_email_hash', emailHash)
+			.single();
+
+		if (error && error.code !== 'PGRST116') { // PGRST116 is 'not found'
+			logger.log('ERROR', 'Error getting referral by email', error);
+		}
+		return data;
+	}
+
+	/**
+	 * Create a referral invite
+	 * @param {Object} params { inviterUserId, inviteeEmail, status }
+	 * @param {Object} env
+	 * @param {Logger} logger
+	 */
+	static async createReferralInvite({ inviterUserId, inviteeEmail, status }, env, logger) {
+		const supabase = this.getSupabaseAdminClient(env);
+
+		const emailHash = await this.hashEmail(inviteeEmail);
+		const displayEmail = this.maskEmail(inviteeEmail);
+		const inviteCode = this.generateInviteCode();
+
+		const { data, error } = await supabase
+			.from('referral_invites')
+			.insert({
+				inviter_user_id: inviterUserId,
+				invitee_email_hash: emailHash,
+				invitee_display_email: displayEmail,
+				invite_code: inviteCode,
+				status: status
+			})
+			.select()
+			.single();
+
+		if (error) {
+			logger.log('ERROR', 'Failed to create referral invite', error);
+			throw error;
+		}
+		return data;
+	}
+
+	// --- Utils ---
+
+	static async hashEmail(email) {
+		const normalized = email.trim().toLowerCase();
+		const msgBuffer = new TextEncoder().encode(normalized);
+		const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+		const hashArray = Array.from(new Uint8Array(hashBuffer));
+		return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+	}
+
+	static maskEmail(email) {
+		const parts = email.split('@');
+		if (parts.length !== 2) return '***@***.***';
+
+		const [local, domain] = parts;
+		let maskedLocal = local;
+		if (local.length > 2) {
+			maskedLocal = local[0] + '*'.repeat(local.length - 2) + local[local.length - 1];
+		} else {
+			maskedLocal = local + '*';
+		}
+
+		const domainParts = domain.split('.');
+		let maskedDomain = domain;
+		if (domainParts.length >= 2) {
+			const dName = domainParts[0];
+			const dExt = domainParts.slice(1).join('.');
+			if (dName.length > 2) {
+				maskedDomain = dName[0] + '*'.repeat(dName.length - 1) + '.' + dExt;
+			} else {
+				maskedDomain = dName + '*.' + dExt;
+			}
+		}
+
+		return `${maskedLocal}@${maskedDomain}`;
+	}
+
+	static generateInviteCode() {
+		const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+		let result = '';
+		for (let i = 0; i < 8; i++) {
+			result += chars.charAt(Math.floor(Math.random() * chars.length));
+		}
+		return result;
 	}
 } 

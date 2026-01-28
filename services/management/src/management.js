@@ -1,10 +1,8 @@
-/**
- * Management Service - Compatible with Serverless API Gateway
- */
-
 import { env, WorkerEntrypoint } from "cloudflare:workers";
 import { Logger } from './utils.js';
 import { DatabaseUtils } from './database.js';
+import { DisposableEmailService } from './disposable_check.js';
+import { EmailService } from './email_service.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -15,10 +13,24 @@ export default class extends WorkerEntrypoint {
 	}
 
 	async fetch(request, env) {
+		// ... (existing fetch)
 		this.initializeLogger(env);
 		this.logger.log('INFO', 'Fetch request received');
 		return new Response("Hello from Management Service");
 	}
+
+	// ... (existing methods: initializeLogger, parseRequestBody, health, healthProtected, debug, appStoreWebhook, signInWithAppleWebhook, scheduleAccountDeletion, cancelAccountDeletion, getAccountDeletionStatus, usageSummary)
+
+	// ... (rest of the file content until usageSummary ends)
+	// I need to be careful with replace_file_content for large files.
+	// Ideally I should append the new method or use multi_replace.
+	// Since I can't request "append", I will try to target the end of the class.
+
+	// WAIT, replace_file_content requires me to match EXACT text. 
+	// It's safer to use multi_replace to insert imports and then insert the function.
+
+
+
 
 	initializeLogger(env) {
 		if (!this.logger) {
@@ -49,7 +61,7 @@ export default class extends WorkerEntrypoint {
 
 	async health(request, caller_env, sagContext) {
 		this.logger.log('INFO', 'Health check requested');
-		
+
 		try {
 			return new Response(JSON.stringify({
 				status: 'healthy',
@@ -85,12 +97,12 @@ export default class extends WorkerEntrypoint {
 
 	async healthProtected(request, caller_env, sagContext) {
 		this.logger.log('INFO', 'Protected health check requested');
-		
+
 		try {
 			// Parse caller environment
 			const callerEnvObj = JSON.parse(caller_env || '{}');
 			const sagContextObj = JSON.parse(sagContext || '{}');
-			
+
 			// Check if user is authenticated
 			if (!callerEnvObj.userId) {
 				return new Response(JSON.stringify({
@@ -142,11 +154,11 @@ export default class extends WorkerEntrypoint {
 
 	async debug(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Debug endpoint requested');
-		
+
 		try {
 			const callerEnvObj = JSON.parse(caller_env || '{}');
 			const sagContextObj = JSON.parse(sagContext || '{}');
-			
+
 			return new Response(JSON.stringify({
 				service: 'management',
 				callerEnvironment: callerEnvObj,
@@ -183,11 +195,11 @@ export default class extends WorkerEntrypoint {
 
 	async appStoreWebhook(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'App Store webhook received');
-		
+
 		try {
 			const requestBody = await this.parseRequestBody(request);
 			const headers = Object.fromEntries(request.headers.entries());
-			
+
 			// Save webhook to database
 			const webhookData = {
 				type: 'app_store',
@@ -197,7 +209,7 @@ export default class extends WorkerEntrypoint {
 			};
 
 			const savedWebhook = await DatabaseUtils.saveWebhookEvent(webhookData, this.env, this.logger);
-			
+
 			if (!savedWebhook) {
 				this.logger.log('ERROR', 'Failed to save App Store webhook to database');
 				return new Response(JSON.stringify({
@@ -251,11 +263,11 @@ export default class extends WorkerEntrypoint {
 
 	async signInWithAppleWebhook(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Sign in with Apple webhook received');
-		
+
 		try {
 			const requestBody = await this.parseRequestBody(request);
 			const headers = Object.fromEntries(request.headers.entries());
-			
+
 			// Save webhook to database
 			const webhookData = {
 				type: 'sign_in_with_apple',
@@ -265,7 +277,7 @@ export default class extends WorkerEntrypoint {
 			};
 
 			const savedWebhook = await DatabaseUtils.saveWebhookEvent(webhookData, this.env, this.logger);
-			
+
 			if (!savedWebhook) {
 				this.logger.log('ERROR', 'Failed to save Sign in with Apple webhook to database');
 				return new Response(JSON.stringify({
@@ -329,14 +341,14 @@ export default class extends WorkerEntrypoint {
 	 */
 	async scheduleAccountDeletion(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Account deletion scheduling requested');
-		
+
 		try {
 			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
 			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
-			
+
 			// Get user ID from JWT
 			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
-			
+
 			if (!userId) {
 				return new Response(JSON.stringify({
 					statusCode: 401,
@@ -353,7 +365,7 @@ export default class extends WorkerEntrypoint {
 
 			// Call database function to schedule deletion
 			const result = await DatabaseUtils.scheduleUserDeletion(userId, this.env, this.logger);
-			
+
 			if (!result.success) {
 				return new Response(JSON.stringify({
 					statusCode: 400,
@@ -409,14 +421,14 @@ export default class extends WorkerEntrypoint {
 	 */
 	async cancelAccountDeletion(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Account deletion cancellation requested');
-		
+
 		try {
 			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
 			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
-			
+
 			// Get user ID from JWT
 			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
-			
+
 			if (!userId) {
 				return new Response(JSON.stringify({
 					statusCode: 401,
@@ -433,7 +445,7 @@ export default class extends WorkerEntrypoint {
 
 			// Call database function to cancel deletion
 			const result = await DatabaseUtils.cancelUserDeletion(userId, this.env, this.logger);
-			
+
 			if (!result.success) {
 				return new Response(JSON.stringify({
 					statusCode: 400,
@@ -482,14 +494,14 @@ export default class extends WorkerEntrypoint {
 	 */
 	async getAccountDeletionStatus(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Account deletion status requested');
-		
+
 		try {
 			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
 			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
-			
+
 			// Get user ID from JWT
 			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
-			
+
 			if (!userId) {
 				return new Response(JSON.stringify({
 					statusCode: 401,
@@ -536,11 +548,11 @@ export default class extends WorkerEntrypoint {
 
 	async usageSummary(request, caller_env = "{}", sagContext = "{}") {
 		this.logger.log('INFO', 'Usage summary requested');
-		
+
 		try {
 			// Parse caller environment
 			const callerEnvObj = JSON.parse(caller_env || '{}');
-			
+
 			// Check if user is authenticated
 			if (!callerEnvObj.userId) {
 				return new Response(JSON.stringify({
@@ -656,6 +668,120 @@ export default class extends WorkerEntrypoint {
 					'Access-Control-Allow-Headers': 'Content-Type, Authorization'
 				}
 			});
+		}
+	}
+
+	/**
+	 * Invite a user via email reference
+	 * POST /v1/referrals/invite
+	 */
+	async inviteUser(request, caller_env = "{}", sagContext = "{}") {
+		this.logger.log('INFO', 'Invite user requested');
+
+		try {
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
+
+			// Get inviter ID from JWT
+			const inviterUserId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
+
+			if (!inviterUserId) {
+				return new Response(JSON.stringify({
+					statusCode: 401,
+					error: 'Unauthorized',
+					message: 'Authentication required'
+				}), {
+					status: 401,
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+
+			const body = await this.parseRequestBody(request);
+			const { inviteeEmail } = body;
+
+			if (!inviteeEmail) {
+				return new Response(JSON.stringify({
+					statusCode: 400,
+					error: 'Bad Request',
+					message: 'inviteeEmail is required'
+				}), { status: 400, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			// Services
+			const disposableService = new DisposableEmailService(this.env, this.logger);
+			const emailService = new EmailService(this.env, this.logger);
+
+			// 1. Check if user already exists (registered)
+			const existingUser = await DatabaseUtils.getUserByEmail(inviteeEmail, this.env, this.logger);
+
+			let status = 'invited';
+
+			if (existingUser) {
+				status = 'already_registered';
+			} else {
+				// 2. Check if email is disposable (ONLY if not already registered)
+				const isDisposable = await disposableService.isDisposable(inviteeEmail);
+				if (isDisposable) {
+					status = 'disposable_email';
+				}
+			}
+
+			// 3. Check Referrals Cap for inviter (Yearly limit)
+			const referralStats = await DatabaseUtils.getReferralStats(inviterUserId, this.env, this.logger);
+			if (referralStats.successfulReferralsLastYear >= 10) { // Max 10 per year
+				return new Response(JSON.stringify({
+					statusCode: 403,
+					error: 'Forbidden',
+					message: 'Yearly referral reward limit reached'
+				}), { status: 403, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			// 4. Create Invite Record
+			// Check for previous invites to this email
+			const previousInvite = await DatabaseUtils.getReferralByEmail(inviteeEmail, this.env, this.logger);
+			if (previousInvite) {
+				return new Response(JSON.stringify({
+					statusCode: 409,
+					error: 'Conflict',
+					message: 'User already invited',
+					code: 'already_invited'
+				}), { status: 409, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			const invite = await DatabaseUtils.createReferralInvite({
+				inviterUserId,
+				inviteeEmail,
+				status
+			}, this.env, this.logger);
+
+			// 5. Send Email if valid (ONLY if status is 'invited')
+			if (status === 'invited') {
+				// Get inviter profile for name
+				const inviterProfile = await DatabaseUtils.getUserProfile(inviterUserId, this.env, this.logger);
+				const inviterName = inviterProfile?.display_name || inviterProfile?.email || 'A user';
+
+				await emailService.sendInviteEmail(inviteeEmail, inviterName);
+			}
+
+			return new Response(JSON.stringify({
+				statusCode: 200,
+				message: status === 'invited' ? 'Invite sent' : 'Contact processed',
+				data: {
+					status: status,
+					inviteId: invite.id
+				}
+			}), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' }
+			});
+
+		} catch (error) {
+			this.logger.log('ERROR', `Invite user failed: ${error.message}`);
+			return new Response(JSON.stringify({
+				statusCode: 500,
+				error: 'Internal Server Error',
+				message: error.message
+			}), { status: 500, headers: { 'Content-Type': 'application/json' } });
 		}
 	}
 } 

@@ -259,6 +259,16 @@
                 "function": "health"
             },
             "auth": false
+        },
+        {
+            "method": "POST",
+            "path": "/v1/referrals/invite",
+            "integration": {
+                "type": "service_binding",
+                "binding": "management_service",
+                "function": "inviteUser"
+            },
+            "auth": true
         }
     ]
 }
