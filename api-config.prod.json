@@ -40,7 +40,6 @@
         "allow_origins": [
             "https://sendfax.pro",
             "https://api.sendfax.pro",
-            "https://api.sendfax.pro",
             "https://send-fax-prod.irensaltali.workers.dev/"
         ],
         "allow_methods": [
