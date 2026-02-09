@@ -44,6 +44,7 @@ describe('DatabaseUtils.transferUserData', () => {
 		// Mock the audit methods to avoid database dependency in tests
 		vi.spyOn(DatabaseUtils, 'createTransferAuditRecord').mockResolvedValue('transfer-123');
 		vi.spyOn(DatabaseUtils, 'updateTransferAuditRecord').mockResolvedValue();
+		vi.spyOn(DatabaseUtils, 'moveRowsByUserId').mockResolvedValue(0);
 	});
 
 	afterEach(() => {
@@ -58,22 +59,6 @@ describe('DatabaseUtils.transferUserData', () => {
 		mockSupabase.auth.admin.getUserById
 			.mockResolvedValueOnce({ data: { user: { id: fromUserId, app_metadata: { is_anonymous: false } } }, error: null })
 			.mockResolvedValueOnce({ data: { user: { id: toUserId, app_metadata: { is_anonymous: false } } }, error: null });
-
-		// Mock audit record creation
-		mockSupabase.insert.mockReturnValueOnce({ data: { id: 'transfer-123' }, error: null });
-
-		// Mock transaction success
-		mockSupabase.rpc.mockResolvedValueOnce({ 
-			data: { 
-				transferred_subscriptions: 0, 
-				transferred_usage: 0, 
-				transferred_faxes: 0 
-			}, 
-			error: null 
-		});
-
-		// Mock audit record update
-		mockSupabase.update.mockReturnValue({ error: null });
 
 		const result = await DatabaseUtils.transferUserData(fromUserId, toUserId, mockEnv, mockLogger);
 
@@ -96,16 +81,6 @@ describe('DatabaseUtils.transferUserData', () => {
 			.mockResolvedValueOnce({ data: { user: { id: fromUserId, app_metadata: { is_anonymous: false } } }, error: null })
 			.mockResolvedValueOnce({ data: { user: { id: toUserId, app_metadata: { is_anonymous: false } } }, error: null })
 			.mockResolvedValueOnce({ data: { user: { id: fromUserId, app_metadata: { is_anonymous: true } } }, error: null });
-
-		// Mock transaction success
-		mockSupabase.rpc.mockResolvedValueOnce({ 
-			data: { 
-				transferred_subscriptions: 0, 
-				transferred_usage: 0, 
-				transferred_faxes: 0 
-			}, 
-			error: null 
-		});
 
 		// Mock user deletion
 		mockSupabase.auth.admin.deleteUser.mockResolvedValue({ error: null });
@@ -145,7 +120,7 @@ describe('DatabaseUtils.transferUserData', () => {
 		expect(result.error).toContain('does not exist');
 	});
 
-	it('should handle transaction failures', async () => {
+	it('should handle transfer failures', async () => {
 		const fromUserId = 'user-1';
 		const toUserId = 'user-2';
 
@@ -154,17 +129,7 @@ describe('DatabaseUtils.transferUserData', () => {
 			.mockResolvedValueOnce({ data: { user: { id: fromUserId, app_metadata: { is_anonymous: false } } }, error: null })
 			.mockResolvedValueOnce({ data: { user: { id: toUserId, app_metadata: { is_anonymous: false } } }, error: null });
 
-		// Mock audit record creation
-		mockSupabase.insert.mockReturnValueOnce({ data: { id: 'transfer-123' }, error: null });
-
-		// Mock transaction failure
-		mockSupabase.rpc.mockResolvedValueOnce({ 
-			data: null, 
-			error: { message: 'Database error' } 
-		});
-
-		// Mock audit record update
-		mockSupabase.update.mockReturnValue({ error: null });
+		DatabaseUtils.moveRowsByUserId.mockRejectedValueOnce(new Error('Database error'));
 
 		const result = await DatabaseUtils.transferUserData(fromUserId, toUserId, mockEnv, mockLogger);
 

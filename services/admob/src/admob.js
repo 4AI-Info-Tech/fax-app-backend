@@ -7,6 +7,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import { Logger } from './utils.js';
 import { verifyAdMobCallback, parseAdMobCallback } from './verifier.js';
 import { DatabaseUtils } from './database.js';
+import { RevenueCatRewardService } from './revenuecat-rewards.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -158,7 +159,7 @@ export default class extends WorkerEntrypoint {
 			}
 
 			// Record completion and grant reward
-			const result = await DatabaseUtils.recordRewardedVideoCompletion({
+			const result = await RevenueCatRewardService.processRewardedVideoCompletion({
 				userId: params.userId,
 				transactionId: params.transactionId,
 				adUnit: params.adUnit,
@@ -168,17 +169,45 @@ export default class extends WorkerEntrypoint {
 				timestamp: params.timestamp
 			}, callerEnvObj, this.logger);
 
-			if (!result.success && result.reason === 'monthly_cap_reached') {
-				this.logger.log('WARN', 'Monthly cap reached for user', { userId: params.userId });
-				return new Response(JSON.stringify({
-					success: false,
-					error: 'Monthly reward cap reached',
-					completionCount: result.completionCount
-				}), {
-					status: 200, // Return 200 to prevent Google from retrying
-					headers: { 'Content-Type': 'application/json' }
-				});
-			}
+				if (!result.success && result.reason === 'daily_ad_limit_reached') {
+					this.logger.log('WARN', 'Daily ad limit reached for user', { userId: params.userId });
+					return new Response(JSON.stringify({
+						success: false,
+						error: '24-hour rewarded ad limit reached',
+						recentAdCount: result.recentAdCount
+					}), {
+						status: 200, // Return 200 to prevent Google from retrying
+						headers: { 'Content-Type': 'application/json' }
+					});
+				}
+
+				if (!result.success && result.reason === 'subscribed_users_cannot_earn') {
+					this.logger.log('WARN', 'Subscribed user attempted rewarded ad earnings', { userId: params.userId });
+					return new Response(JSON.stringify({
+						success: false,
+						error: 'Rewarded ads are available for free users only'
+					}), {
+						status: 200, // Return 200 to prevent Google from retrying
+						headers: { 'Content-Type': 'application/json' }
+					});
+				}
+
+				if (!result.success && result.reason === 'revenuecat_grant_failed') {
+					this.logger.log('ERROR', 'Reward grant failed, returning retryable response', {
+						userId: params.userId,
+						transactionId: params.transactionId,
+						grantError: result.grantError,
+						rolledBack: result.rolledBack
+					});
+					return new Response(JSON.stringify({
+						success: false,
+						error: 'Temporary processing failure, retrying is safe',
+						transactionId: params.transactionId
+					}), {
+						status: 500,
+						headers: { 'Content-Type': 'application/json' }
+					});
+				}
 
 			this.logger.log('INFO', 'SSV callback processed successfully', {
 				transactionId: params.transactionId,
@@ -200,13 +229,13 @@ export default class extends WorkerEntrypoint {
 				error: error.message,
 				stack: error.stack
 			});
-			// Always return 200 to prevent Google from retrying
+			// Return 500 for unexpected failures so Google can retry safely.
 			return new Response(JSON.stringify({
 				success: false,
 				error: 'Internal server error',
 				processed: false
 			}), {
-				status: 200,
+				status: 500,
 				headers: { 'Content-Type': 'application/json' }
 			});
 		}

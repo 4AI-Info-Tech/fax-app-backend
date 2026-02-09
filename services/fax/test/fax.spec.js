@@ -23,7 +23,9 @@ vi.mock('../src/database.js', () => ({
 			}))
 		})),
 		saveFaxRecord: vi.fn().mockResolvedValue({ id: 'saved-fax-123', notifyre_fax_id: 'fax_mock_123' }),
+		getFaxRecord: vi.fn().mockResolvedValue({ id: 'updated-fax-123', status: 'queued', user_id: 'test-user-123' }),
 		updateFaxRecord: vi.fn().mockResolvedValue({ id: 'updated-fax-123' }),
+		recordUsage: vi.fn().mockResolvedValue({ success: true }),
 		
 		storeWebhookEvent: vi.fn().mockResolvedValue(true)
 	},
@@ -181,15 +183,17 @@ describe('Fax Service', () => {
 	let mockSagContext;
 
 	beforeAll(() => {
-		mockEnv = {
-			NOTIFYRE_API_KEY: {
-				get: vi.fn().mockResolvedValue('test-notifyre-key')
-			},
-			SUPABASE_URL: 'https://test.supabase.co',
-			SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
-			SUPABASE_WEBHOOK_SECRET: 'test-webhook-secret',
-			LOG_LEVEL: 'DEBUG'
-		};
+			mockEnv = {
+				NOTIFYRE_API_KEY: {
+					get: vi.fn().mockResolvedValue('test-notifyre-key')
+				},
+				SUPABASE_URL: 'https://test.supabase.co',
+				SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+				SUPABASE_WEBHOOK_SECRET: 'test-webhook-secret',
+				REVENUECAT_PROJECT_ID: 'test-project',
+				REVENUECAT_SECRET_API_KEY: 'test-rc-secret',
+				LOG_LEVEL: 'DEBUG'
+			};
 		
 		mockSagContext = {
 			jwtPayload: {
@@ -220,6 +224,30 @@ describe('Fax Service', () => {
 		global.fetch.mockImplementation((url, options) => {
 			const urlObj = new URL(url);
 			const path = urlObj.pathname;
+			const jsonResponse = (statusCode, payload) => ({
+				ok: statusCode >= 200 && statusCode < 300,
+				status: statusCode,
+				json: () => Promise.resolve(payload),
+				text: () => Promise.resolve(JSON.stringify(payload))
+			});
+
+			// RevenueCat API mocks
+			if (urlObj.hostname === 'api.revenuecat.com' && path.endsWith('/active_entitlements')) {
+				return Promise.resolve(jsonResponse(200, { items: [] }));
+			}
+
+			if (urlObj.hostname === 'api.revenuecat.com' && path.endsWith('/virtual_currencies')) {
+				return Promise.resolve(jsonResponse(200, {
+					items: [
+						{ currency_code: 'FreeCredit', balance: 100 },
+						{ currency_code: 'ProCredit', balance: 0 }
+					]
+				}));
+			}
+
+			if (urlObj.hostname === 'api.revenuecat.com' && path.endsWith('/virtual_currencies/transactions')) {
+				return Promise.resolve(jsonResponse(200, { success: true }));
+			}
 
 			// Mock responses based on the path
 			if (path === '/fax/send') {
@@ -232,28 +260,23 @@ describe('Fax Service', () => {
 					}
 				}
 				
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						payload: {
-							faxID: 'fax_mock_123',
-							friendlyID: 'TEST123'
-						},
-						success: true,
-						statusCode: 200,
-						message: "OK",
-						errors: []
-					})
-				});
-			}
+					return Promise.resolve(jsonResponse(200, {
+							payload: {
+								faxID: 'fax_mock_123',
+								friendlyID: 'TEST123'
+							},
+							success: true,
+							statusCode: 200,
+							message: "OK",
+							errors: []
+						}));
+				}
 
-			if (path.startsWith('/fax/sent') && path.includes('?')) {
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						data: [
-							{
-								id: 'fax_123',
+				if (path.startsWith('/fax/sent') && path.includes('?')) {
+					return Promise.resolve(jsonResponse(200, {
+							data: [
+								{
+									id: 'fax_123',
 								status: 'Successful',
 								recipients: ['1234567890'],
 								pages: 1,
@@ -261,86 +284,66 @@ describe('Fax Service', () => {
 								sentAt: '2024-01-01T00:00:00Z',
 								completedAt: '2024-01-01T00:05:00Z'
 							}
-						],
-						total: 1
-					})
-				});
-			}
+							],
+							total: 1
+						}));
+				}
 
-			if (path === '/fax/sent/fax_123') {
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						id: 'fax_123',
-						status: 'Successful',
-						recipients: ['1234567890'],
+				if (path === '/fax/sent/fax_123') {
+					return Promise.resolve(jsonResponse(200, {
+							id: 'fax_123',
+							status: 'Successful',
+							recipients: ['1234567890'],
 						pages: 1,
-						cost: 0.03,
-						sentAt: '2024-01-01T00:00:00Z',
-						completedAt: '2024-01-01T00:05:00Z'
-					})
-				});
-			}
+							cost: 0.03,
+							sentAt: '2024-01-01T00:00:00Z',
+							completedAt: '2024-01-01T00:05:00Z'
+						}));
+				}
 
-			if (path.startsWith('/fax/received') && path.includes('?')) {
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						data: [
-							{
-								id: 'received_123',
+				if (path.startsWith('/fax/received') && path.includes('?')) {
+					return Promise.resolve(jsonResponse(200, {
+							data: [
+								{
+									id: 'received_123',
 								sender: '+0987654321',
 								pages: 2,
 								receivedAt: '2024-01-01T00:00:00Z',
 								faxNumber: '+1234567890'
 							}
-						],
-						total: 1
-					})
-				});
-			}
+							],
+							total: 1
+						}));
+				}
 
-			if (path.includes('/download')) {
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						fileData: 'base64encodeddata',
-						filename: path.includes('sent') ? 'fax_123.pdf' : 'received_fax_123.pdf',
-						mimeType: 'application/pdf'
-					})
-				});
-			}
+				if (path.includes('/download')) {
+					return Promise.resolve(jsonResponse(200, {
+							fileData: 'base64encodeddata',
+							filename: path.includes('sent') ? 'fax_123.pdf' : 'received_fax_123.pdf',
+							mimeType: 'application/pdf'
+						}));
+				}
 
-			if (path === '/fax/numbers') {
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						data: [
-							{ number: '+1234567890', status: 'active' }
-						]
-					})
-				});
-			}
+				if (path === '/fax/numbers') {
+					return Promise.resolve(jsonResponse(200, {
+							data: [
+								{ number: '+1234567890', status: 'active' }
+							]
+						}));
+				}
 
-			if (path === '/fax/cover-pages') {
-				return Promise.resolve({
-					ok: true,
-					json: () => Promise.resolve({
-						data: [
-							{ id: 'cp_1', name: 'Default Cover Page' }
-						]
-					})
-				});
-			}
+				if (path === '/fax/cover-pages') {
+					return Promise.resolve(jsonResponse(200, {
+							data: [
+								{ id: 'cp_1', name: 'Default Cover Page' }
+							]
+						}));
+				}
 
-			// Default mock response
-			return Promise.resolve({
-				ok: false,
-				status: 404,
-				json: () => Promise.resolve({ error: 'Not found' })
+				// Default mock response
+				return Promise.resolve(jsonResponse(404, { error: 'Not found' }));
 			});
 		});
-	});
 
 	describe('sendFax', () => {
 		it('should queue a fax successfully', async () => {

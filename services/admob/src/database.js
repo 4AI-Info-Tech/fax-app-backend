@@ -44,56 +44,42 @@ export class DatabaseUtils {
 		}
 	}
 
-	/**
-	 * Record rewarded video completion and grant free credits
-	 * - Checks 24-hour sliding window limit (max 3 ads)
-	 * - Inserts directly into free_credits table with type='ad'
-	 */
-	static async recordRewardedVideoCompletion(params, env, logger) {
-		const { userId, transactionId, adUnit, rewardAmount, rewardItem, adNetwork, timestamp } = params;
-
+	static async getRecentAdCountIn24Hours(userId, env, logger) {
 		try {
 			const supabase = this.getSupabaseClient(env);
-
-			// Check 24-hour sliding window cap (3 ads max in last 24 hours)
 			const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-			const { data: recentAds, error: recentError } = await supabase
-				.from('free_credits')
-				.select('id, created_at')
+			const { data: recentAds, error } = await supabase
+				.from('rewarded_video_completions')
+				.select('id, completed_at')
 				.eq('user_id', userId)
-				.eq('type', 'ad')
-				.gte('created_at', twentyFourHoursAgo);
+				.gte('completed_at', twentyFourHoursAgo);
 
-			if (recentError) {
-				logger?.log('ERROR', 'Error checking 24h ad count', { error: recentError.message });
-				throw recentError;
+			if (error) {
+				logger?.log('ERROR', 'Error checking 24h ad count', { error: error.message });
+				throw error;
 			}
 
-			const recentAdCount = recentAds?.length || 0;
-			if (recentAdCount >= 3) {
-				logger?.log('WARN', 'User has reached 24-hour ad limit', {
-					userId,
-					recentAdCount,
-					oldestAdInWindow: recentAds[0]?.created_at
-				});
-				return {
-					success: false,
-					reason: 'daily_ad_limit_reached',
-					recentAdCount,
-					limitResetInfo: 'Limit resets on a 24-hour sliding window basis'
-				};
-			}
+			return {
+				recentAdCount: recentAds?.length || 0,
+				recentAds: recentAds || []
+			};
+		} catch (error) {
+			logger?.log('ERROR', 'Database error checking 24h ad count', { error: error.message });
+			throw error;
+		}
+	}
 
-			// Get current month in YYYY-MM format for completion tracking
+	static async insertRewardedVideoCompletion(params, env, logger) {
+		const { userId, transactionId, adUnit, rewardCredits, rewardItem, adNetwork, timestamp } = params;
+		try {
+			const supabase = this.getSupabaseClient(env);
 			const currentMonth = new Date().toISOString().substring(0, 7);
-
-			// Insert completion record (for tracking/idempotency)
 			const completionData = {
 				user_id: userId,
 				completion_token: transactionId,
 				ad_unit_id: adUnit,
-				credits_granted: rewardAmount || 1,
+				credits_granted: rewardCredits,
 				month_year: currentMonth,
 				metadata: {
 					ad_network: adNetwork,
@@ -103,83 +89,22 @@ export class DatabaseUtils {
 				}
 			};
 
-			const { data: completion, error: insertError } = await supabase
+			const { data: completion, error } = await supabase
 				.from('rewarded_video_completions')
 				.insert(completionData)
 				.select()
 				.single();
 
-			if (insertError) {
-				// Check for duplicate key error
-				if (insertError.code === '23505') {
-					logger?.log('INFO', 'Duplicate transaction detected', { transactionId });
-					return { success: true, duplicate: true };
+			if (error) {
+				if (error.code === '23505') {
+					return { duplicate: true, completion: null };
 				}
-				logger?.log('ERROR', 'Error inserting completion', { error: insertError.message });
-				throw insertError;
+				throw error;
 			}
 
-			// Calculate expiry date (30 days from now)
-			const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-			// Insert into free_credits table
-			const freeCreditData = {
-				user_id: userId,
-				type: 'ad',
-				credit_limit: rewardAmount || 1,
-				credits_used: 0,
-				expires_at: expiresAt,
-				reference_id: completion.id,
-				is_active: true,
-				metadata: {
-					transaction_id: transactionId,
-					ad_unit_id: adUnit,
-					ad_network: adNetwork,
-					reward_item: rewardItem,
-					source: 'admob_ssv',
-					completion_id: completion.id
-				}
-			};
-
-			const { data: freeCredit, error: freeCreditError } = await supabase
-				.from('free_credits')
-				.insert(freeCreditData)
-				.select()
-				.single();
-
-			if (freeCreditError) {
-				logger?.log('ERROR', 'Error inserting free credit', { error: freeCreditError.message });
-				// Don't throw - completion was recorded, credit grant failed
-				return {
-					success: true,
-					completionId: completion.id,
-					creditsGranted: false,
-					grantError: freeCreditError.message
-				};
-			}
-
-			logger?.log('INFO', 'Rewarded video completion recorded and free credits granted', {
-				userId,
-				transactionId,
-				completionId: completion.id,
-				freeCreditId: freeCredit.id,
-				creditsGranted: rewardAmount || 1,
-				expiresAt,
-				recentAdCount: recentAdCount + 1
-			});
-
-			return {
-				success: true,
-				completionId: completion.id,
-				freeCreditId: freeCredit.id,
-				creditsGranted: rewardAmount || 1,
-				expiresAt,
-				adsWatchedIn24h: recentAdCount + 1,
-				adsRemainingIn24h: 3 - (recentAdCount + 1)
-			};
-
+			return { duplicate: false, completion };
 		} catch (error) {
-			logger?.log('ERROR', 'Database error recording completion', { error: error.message });
+			logger?.log('ERROR', 'Database error inserting completion', { error: error.message });
 			throw error;
 		}
 	}

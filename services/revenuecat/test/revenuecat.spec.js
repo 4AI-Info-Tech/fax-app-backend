@@ -51,14 +51,14 @@ describe('RevenueCat Service', () => {
 				SUPABASE_SERVICE_ROLE_KEY: 'test-key'
 			};
 
-			const webhookData = {
-				event: {
-					id: 'test-event-123',
-					type: 'INITIAL_PURCHASE',
-					original_app_user_id: 'user-123',
-					product_id: 'product-123'
-				}
-			};
+				const webhookData = {
+					event: {
+						id: 'test-event-123',
+						type: 'INITIAL_PURCHASE',
+						original_app_user_id: '11111111-1111-1111-1111-111111111111',
+						product_id: 'product-123'
+					}
+				};
 
 			// Mock existing event found
 			const existingEvent = {
@@ -83,15 +83,14 @@ describe('RevenueCat Service', () => {
 			const { createClient } = await import('@supabase/supabase-js');
 			createClient.mockReturnValue(mockSupabaseClient);
 
-			const result = await DatabaseUtils.storeRevenueCatWebhookEvent(webhookData, mockEnv, mockLogger);
+				const result = await DatabaseUtils.storeRevenueCatWebhookEvent(webhookData, mockEnv, mockLogger);
 
-			expect(result).toEqual(existingEvent);
-			expect(mockLogger.log).toHaveBeenCalledWith('WARN', 'Duplicate webhook event detected, skipping processing', {
-				eventId: 'test-event-123',
-				eventType: 'INITIAL_PURCHASE',
-				originalProcessedAt: '2024-01-01T00:00:00Z'
+				expect(result).toEqual(existingEvent);
+				expect(mockLogger.log).toHaveBeenCalledWith('INFO', 'Duplicate RevenueCat event detected, returning existing event', {
+					eventId: 'test-event-123',
+					eventType: 'INITIAL_PURCHASE'
+				});
 			});
-		});
 
 		it('should handle unique constraint violations gracefully', async () => {
 			const mockEnv = {
@@ -99,52 +98,67 @@ describe('RevenueCat Service', () => {
 				SUPABASE_SERVICE_ROLE_KEY: 'test-key'
 			};
 
-			const webhookData = {
-				event: {
-					id: 'test-event-123',
-					type: 'INITIAL_PURCHASE',
-					original_app_user_id: 'user-123',
-					product_id: 'product-123'
-				}
-			};
+				const webhookData = {
+					event: {
+						id: 'test-event-123',
+						type: 'INITIAL_PURCHASE',
+						original_app_user_id: '11111111-1111-1111-1111-111111111111',
+						product_id: 'product-123'
+					}
+				};
 
-			// Test that the function handles errors gracefully
-			const mockSelectChain = {
-				eq: vi.fn(() => ({
-					single: vi.fn(() => Promise.resolve({ data: null, error: { code: 'PGRST116' } }))
-				}))
-			};
+				const existingEvent = {
+					id: 'db-123',
+					event_id: 'test-event-123',
+					event_type: 'INITIAL_PURCHASE',
+					processed_at: '2024-01-01T00:00:00Z'
+				};
 
-			const mockInsertChain = {
-				select: vi.fn(() => ({
-					single: vi.fn(() => Promise.resolve({ 
+				// Pre-insert duplicate check -> not found
+				const mockSelectChain = {
+					eq: vi.fn(() => ({
+						single: vi.fn(() => Promise.resolve({ data: null, error: { code: 'PGRST116' } }))
+					}))
+				};
+
+				// Insert returns unique-violation, then duplicate lookup returns existing event
+				const mockInsertChain = {
+					select: vi.fn(() => ({
+						single: vi.fn(() => Promise.resolve({ 
 						data: null, 
 						error: { 
 							code: '23505', 
 							message: 'duplicate key value violates unique constraint "revenuecat_webhook_events_event_id_unique"' 
 						} 
 					}))
-				}))
-			};
+					}))
+				};
 
-			mockSupabaseClient.from
-				.mockReturnValueOnce({
-					select: vi.fn(() => mockSelectChain)
-				})
-				.mockReturnValueOnce({
-					insert: vi.fn(() => mockInsertChain)
-				});
+				const mockSelectExistingChain = {
+					eq: vi.fn(() => ({
+						single: vi.fn(() => Promise.resolve({ data: existingEvent, error: null }))
+					}))
+				};
+
+				mockSupabaseClient.from
+					.mockReturnValueOnce({
+						select: vi.fn(() => mockSelectChain)
+					})
+					.mockReturnValueOnce({
+						insert: vi.fn(() => mockInsertChain)
+					})
+					.mockReturnValueOnce({
+						select: vi.fn(() => mockSelectExistingChain)
+					});
 
 			// Mock createClient to return our mock
 			const { createClient } = await import('@supabase/supabase-js');
 			createClient.mockReturnValue(mockSupabaseClient);
 
-			const result = await DatabaseUtils.storeRevenueCatWebhookEvent(webhookData, mockEnv, mockLogger);
+				const result = await DatabaseUtils.storeRevenueCatWebhookEvent(webhookData, mockEnv, mockLogger);
 
-			// The function should handle the error gracefully and return null
-			expect(result).toBeNull();
-			expect(mockLogger.log).toHaveBeenCalledWith('ERROR', 'Error storing RevenueCat webhook event', expect.any(Object));
-		});
+				expect(result).toEqual(existingEvent);
+			});
 
 		it('should check webhook event existence correctly', async () => {
 			const mockEnv = {

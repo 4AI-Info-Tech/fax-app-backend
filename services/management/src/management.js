@@ -3,6 +3,7 @@ import { Logger } from './utils.js';
 import { DatabaseUtils } from './database.js';
 import { DisposableEmailService } from './disposable_check.js';
 import { EmailService } from './email_service.js';
+import { RevenueCatClient } from '../../shared/revenuecat-client.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -18,19 +19,6 @@ export default class extends WorkerEntrypoint {
 		this.logger.log('INFO', 'Fetch request received');
 		return new Response("Hello from Management Service");
 	}
-
-	// ... (existing methods: initializeLogger, parseRequestBody, health, healthProtected, debug, appStoreWebhook, signInWithAppleWebhook, scheduleAccountDeletion, cancelAccountDeletion, getAccountDeletionStatus, usageSummary)
-
-	// ... (rest of the file content until usageSummary ends)
-	// I need to be careful with replace_file_content for large files.
-	// Ideally I should append the new method or use multi_replace.
-	// Since I can't request "append", I will try to target the end of the class.
-
-	// WAIT, replace_file_content requires me to match EXACT text. 
-	// It's safer to use multi_replace to insert imports and then insert the function.
-
-
-
 
 	initializeLogger(env) {
 		if (!this.logger) {
@@ -685,16 +673,28 @@ export default class extends WorkerEntrypoint {
 			// Get inviter ID from JWT
 			const inviterUserId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
 
-			if (!inviterUserId) {
-				return new Response(JSON.stringify({
-					statusCode: 401,
-					error: 'Unauthorized',
-					message: 'Authentication required'
+				if (!inviterUserId) {
+					return new Response(JSON.stringify({
+						statusCode: 401,
+						error: 'Unauthorized',
+						message: 'Authentication required'
 				}), {
 					status: 401,
 					headers: { 'Content-Type': 'application/json' }
-				});
-			}
+					});
+				}
+
+				const rcClient = new RevenueCatClient(callerEnvObj, this.logger);
+				if (rcClient.isConfigured()) {
+					const inviterSnapshot = await rcClient.getCreditSnapshot(inviterUserId);
+					if (inviterSnapshot.isSubscriber) {
+						return new Response(JSON.stringify({
+							statusCode: 403,
+							error: 'Forbidden',
+							message: 'Referral invites are available for free users only'
+						}), { status: 403, headers: { 'Content-Type': 'application/json' } });
+					}
+				}
 
 			const body = await this.parseRequestBody(request);
 			const { inviteeEmail } = body;
@@ -784,4 +784,213 @@ export default class extends WorkerEntrypoint {
 			}), { status: 500, headers: { 'Content-Type': 'application/json' } });
 		}
 	}
-} 
+
+	/**
+	 * Bootstrap rewards for the authenticated user.
+	 * - Grants one-time signup bonus (5 free credits)
+	 * - Processes referral reward (5 free credits to inviter + invitee) when eligible
+	 */
+	async bootstrapRewards(request, caller_env = "{}", sagContext = "{}") {
+		try {
+			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
+			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
+			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || callerEnvObj.userId;
+
+			if (!userId) {
+				return new Response(JSON.stringify({
+					statusCode: 401,
+					error: 'Unauthorized',
+					message: 'Authentication required'
+				}), { status: 401, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			const rcClient = new RevenueCatClient(callerEnvObj, this.logger);
+			if (!rcClient.isConfigured()) {
+				return new Response(JSON.stringify({
+					statusCode: 500,
+					error: 'Billing configuration error',
+					message: rcClient.getConfigurationError()
+				}), { status: 500, headers: { 'Content-Type': 'application/json' } });
+			}
+
+			const supabase = DatabaseUtils.getSupabaseAdminClient(callerEnvObj);
+			const freeCurrencyCode = rcClient.freeCurrencyCodes[0];
+			const rewardSummary = {
+				signup: { granted: false, reason: null },
+				referral: { inviteeGranted: false, inviterGranted: false, referralId: null, reason: null }
+			};
+
+			// Signup bonus (idempotent)
+			const { data: existingSignupEvents, error: signupEventError } = await supabase
+				.from('revenuecat_credit_events')
+				.select('id')
+				.eq('user_id', userId)
+				.eq('event_type', 'signup_bonus')
+				.limit(1);
+			if (signupEventError) {
+				throw signupEventError;
+			}
+
+			if ((existingSignupEvents || []).length === 0) {
+				const signupGrant = await rcClient.grantCredits(userId, freeCurrencyCode, 5);
+				if (signupGrant.success) {
+					const { error: insertSignupEventError } = await supabase
+						.from('revenuecat_credit_events')
+						.insert({
+							user_id: userId,
+							event_type: 'signup_bonus',
+							reference_id: 'signup',
+							credits: 5,
+							currency_code: freeCurrencyCode,
+							metadata: {
+								source: 'api_rewards_bootstrap'
+							}
+						});
+					if (insertSignupEventError) {
+						throw insertSignupEventError;
+					}
+					rewardSummary.signup.granted = true;
+				} else {
+					rewardSummary.signup.reason = signupGrant.error || 'signup_bonus_grant_failed';
+				}
+			} else {
+				rewardSummary.signup.reason = 'already_granted';
+			}
+
+			// Referral reward (idempotent per user and referral id)
+			let userEmail = sagContextObj.jwtPayload?.email || callerEnvObj.email || null;
+			if (!userEmail) {
+				const authUser = await DatabaseUtils.getUser(userId, callerEnvObj, this.logger);
+				userEmail = authUser?.email || null;
+			}
+
+			if (!userEmail) {
+				rewardSummary.referral.reason = 'email_unavailable';
+			} else {
+				const emailHash = await DatabaseUtils.hashEmail(userEmail);
+				const { data: referralRows, error: referralLookupError } = await supabase
+					.from('referral_invites')
+					.select('*')
+					.eq('invitee_email_hash', emailHash)
+					.limit(1);
+
+				if (referralLookupError) {
+					throw referralLookupError;
+				}
+
+				const referral = (referralRows || [])[0] || null;
+				if (!referral) {
+					rewardSummary.referral.reason = 'no_referral_record';
+				} else if (referral.status === 'reward_granted') {
+					rewardSummary.referral.referralId = referral.id;
+					rewardSummary.referral.reason = 'already_granted';
+				} else if (referral.inviter_user_id === userId) {
+					rewardSummary.referral.referralId = referral.id;
+					rewardSummary.referral.reason = 'self_referral_not_allowed';
+				} else if (referral.invitee_user_id && referral.invitee_user_id !== userId) {
+					rewardSummary.referral.referralId = referral.id;
+					rewardSummary.referral.reason = 'referral_already_claimed';
+				} else {
+					rewardSummary.referral.referralId = referral.id;
+
+					const oneYearAgo = new Date();
+					oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+					const { count: yearlyRewardedCount, error: yearlyCountError } = await supabase
+						.from('referral_invites')
+						.select('*', { count: 'exact', head: true })
+						.eq('inviter_user_id', referral.inviter_user_id)
+						.eq('status', 'reward_granted')
+						.gt('reward_granted_at', oneYearAgo.toISOString());
+					if (yearlyCountError) {
+						throw yearlyCountError;
+					}
+
+					if ((yearlyRewardedCount || 0) >= 10) {
+						rewardSummary.referral.reason = 'inviter_yearly_cap_reached';
+					} else {
+						const [inviteeSnapshot, inviterSnapshot] = await Promise.all([
+							rcClient.getCreditSnapshot(userId),
+							rcClient.getCreditSnapshot(referral.inviter_user_id)
+						]);
+
+						if (inviteeSnapshot.isSubscriber || inviterSnapshot.isSubscriber) {
+							rewardSummary.referral.reason = 'subscriber_not_eligible';
+						} else {
+							const grantReferralRewardIfMissing = async (targetUserId) => {
+								const { data: rewardEvents, error: rewardEventError } = await supabase
+									.from('revenuecat_credit_events')
+									.select('id')
+									.eq('user_id', targetUserId)
+									.eq('event_type', 'referral_reward')
+									.eq('reference_id', referral.id)
+									.limit(1);
+								if (rewardEventError) {
+									throw rewardEventError;
+								}
+
+								if ((rewardEvents || []).length > 0) {
+									return false;
+								}
+
+								const grantResult = await rcClient.grantCredits(targetUserId, freeCurrencyCode, 5);
+								if (!grantResult.success) {
+									throw new Error(grantResult.error || 'Failed to grant referral reward');
+								}
+
+								const { error: insertRewardEventError } = await supabase
+									.from('revenuecat_credit_events')
+									.insert({
+										user_id: targetUserId,
+										event_type: 'referral_reward',
+										reference_id: referral.id,
+										credits: 5,
+										currency_code: freeCurrencyCode,
+										metadata: {
+											source: 'api_rewards_bootstrap',
+											referral_id: referral.id
+										}
+									});
+								if (insertRewardEventError) {
+									throw insertRewardEventError;
+								}
+
+								return true;
+							};
+
+							rewardSummary.referral.inviteeGranted = await grantReferralRewardIfMissing(userId);
+							rewardSummary.referral.inviterGranted = await grantReferralRewardIfMissing(referral.inviter_user_id);
+
+							const signedUpAt = referral.signed_up_at || new Date().toISOString();
+							const { error: updateReferralError } = await supabase
+								.from('referral_invites')
+								.update({
+									invitee_user_id: userId,
+									status: 'reward_granted',
+									signed_up_at: signedUpAt,
+									reward_granted_at: new Date().toISOString(),
+									updated_at: new Date().toISOString()
+								})
+								.eq('id', referral.id);
+							if (updateReferralError) {
+								throw updateReferralError;
+							}
+						}
+					}
+				}
+			}
+
+			return new Response(JSON.stringify({
+				statusCode: 200,
+				message: 'Rewards bootstrap processed',
+				data: rewardSummary
+			}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+		} catch (error) {
+			this.logger.log('ERROR', `Rewards bootstrap failed: ${error.message}`);
+			return new Response(JSON.stringify({
+				statusCode: 500,
+				error: 'Internal Server Error',
+				message: error.message
+			}), { status: 500, headers: { 'Content-Type': 'application/json' } });
+		}
+	}
+}

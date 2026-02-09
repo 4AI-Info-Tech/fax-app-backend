@@ -232,6 +232,25 @@ export class NotificationService {
                 }
             });
 
+            const responseErrors = Array.isArray(responseData.errors)
+                ? responseData.errors.filter(Boolean)
+                : [];
+            if (responseErrors.length > 0) {
+                this.logger.log('WARN', 'OneSignal accepted request but returned notification errors', {
+                    userId: userIdString,
+                    faxId: notification.faxId,
+                    errors: responseErrors,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids,
+                    oneSignalId: responseData.id || null
+                });
+                return {
+                    success: false,
+                    error: responseErrors.join('; '),
+                    statusCode: response.status,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids
+                };
+            }
+
             // Check for invalid external user IDs (user not found in OneSignal)
             if (responseData.invalid_external_user_ids && responseData.invalid_external_user_ids.length > 0) {
                 this.logger.log('WARN', 'OneSignal returned invalid external user IDs', {
@@ -269,8 +288,14 @@ export class NotificationService {
                     faxId: notification.faxId,
                     oneSignalId: responseData.id,
                     invalid_external_user_ids: responseData.invalid_external_user_ids,
-                    message: 'Notification may not have been delivered. Check if external_user_id is set correctly.'
+                    message: 'Notification was accepted but not routed to any subscribed recipients.'
                 });
+                return {
+                    success: false,
+                    error: 'OneSignal reported zero recipients',
+                    statusCode: response.status,
+                    invalid_external_user_ids: responseData.invalid_external_user_ids
+                };
             }
 
             this.logger.log('INFO', 'Push notification sent successfully', {

@@ -18,6 +18,7 @@ enabled = true
 [env.staging.vars]
 ENVIRONMENT = "staging"
 LOG_LEVEL = "DEBUG"
+REVENUECAT_PROJECT_ID = "proj7a20ca10"
 
 [env.prod]
 name = "revenuecat-service-prod" 
@@ -30,4 +31,5 @@ head_sampling_rate = 1
 [env.prod.vars]
 ENVIRONMENT = "prod"
 LOG_LEVEL = "INFO"
+REVENUECAT_PROJECT_ID = "proj7a20ca10"
 
