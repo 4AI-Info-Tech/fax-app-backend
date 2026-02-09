@@ -29,10 +29,14 @@ export class DatabaseUtils {
 
 			const supabase = this.getSupabaseAdminClient(env);
 
-			const metadata = {
-				...(faxData.providerResponse || faxData.notifyreResponse || {}),
-				friendlyId: faxData.friendlyId || null
-			};
+				const customMetadata = faxData.metadata && typeof faxData.metadata === 'object' && !Array.isArray(faxData.metadata)
+					? faxData.metadata
+					: {};
+				const metadata = {
+					...customMetadata,
+					...(faxData.providerResponse || faxData.notifyreResponse || {}),
+					friendlyId: faxData.friendlyId || null
+				};
 
 			// Check if the sender number is in our own numbers table
 			const isFromMobileApp = await FaxDatabaseUtils.isOwnNumber(faxData.senderId, env, logger);

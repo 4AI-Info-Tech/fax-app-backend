@@ -40,7 +40,7 @@ export default class extends WorkerEntrypoint {
 	/**
 	 * Deduct credits in RevenueCat when a fax reaches delivered state.
 	 */
-	async deductCreditsForDeliveredFax(userId, creditsToDeduct, faxId, callerEnvObj, provider) {
+	async deductCreditsForDeliveredFax(userId, creditsToDeduct, faxId, callerEnvObj, provider, billingContext = null) {
 		try {
 			const amountToConsume = Math.max(0, Math.ceil(Number(creditsToDeduct) || 0));
 			if (!userId || amountToConsume <= 0) {
@@ -51,62 +51,103 @@ export default class extends WorkerEntrypoint {
 					provider
 				});
 				return;
-			}
+				}
 
-			const rcClient = new RevenueCatClient(callerEnvObj, this.logger);
-			if (!rcClient.isConfigured()) {
-				this.logger.log('ERROR', 'RevenueCat is not configured, cannot deduct delivered fax credits', {
+				const rcClient = new RevenueCatClient(callerEnvObj, this.logger);
+				if (!rcClient.isConfigured()) {
+					this.logger.log('ERROR', 'RevenueCat is not configured, cannot deduct delivered fax credits', {
 					userId,
 					faxId,
 					provider,
 					error: rcClient.getConfigurationError()
 				});
-				return;
-			}
+					return;
+				}
 
-			const snapshot = await rcClient.getCreditSnapshot(userId);
-			const currencyCode = snapshot.activeCurrencyCode;
+				let revenueCatCustomerId = billingContext?.revenueCatCustomerId || null;
+				let currencyCode = billingContext?.activeCurrencyCode || null;
+				let isSubscriber = billingContext?.isSubscriber;
+				let resolutionSource = billingContext ? 'fax_record_metadata' : 'snapshot';
 
-			if (!currencyCode) {
-				this.logger.log('ERROR', 'RevenueCat active currency not resolved for delivered fax deduction', {
-					userId,
-					faxId,
-					provider,
-					isSubscriber: snapshot.isSubscriber
-				});
-				return;
-			}
+				if (!revenueCatCustomerId || !currencyCode) {
+					const snapshot = await rcClient.getCreditSnapshot(revenueCatCustomerId || userId);
+					revenueCatCustomerId = revenueCatCustomerId || snapshot.customerId || userId;
+					currencyCode = currencyCode || snapshot.activeCurrencyCode;
+					isSubscriber = snapshot.isSubscriber;
+					resolutionSource = 'snapshot';
+				}
 
-			const deductionResult = await rcClient.consumeCredits(userId, currencyCode, amountToConsume);
+				if (!currencyCode) {
+					this.logger.log('ERROR', 'RevenueCat active currency not resolved for delivered fax deduction', {
+						userId,
+						revenueCatCustomerId,
+						faxId,
+						provider,
+						isSubscriber: isSubscriber ?? null,
+						resolutionSource
+					});
+					return;
+				}
+
+				const deductionResult = await rcClient.consumeCredits(revenueCatCustomerId, currencyCode, amountToConsume);
 			if (!deductionResult.success) {
 				this.logger.log('ERROR', 'RevenueCat credit deduction failed for delivered fax', {
 					userId,
+					revenueCatCustomerId,
+						faxId,
+						provider,
+						currencyCode,
+						amountToConsume,
+						insufficientCredits: deductionResult.insufficientCredits,
+						error: deductionResult.error,
+						resolutionSource
+					});
+					return;
+				}
+
+				this.logger.log('INFO', 'RevenueCat credits deducted for delivered fax', {
+				userId,
+				revenueCatCustomerId,
 					faxId,
 					provider,
 					currencyCode,
 					amountToConsume,
-					insufficientCredits: deductionResult.insufficientCredits,
-					error: deductionResult.error
+					isSubscriber: isSubscriber ?? null,
+					resolutionSource
 				});
-				return;
-			}
-
-			this.logger.log('INFO', 'RevenueCat credits deducted for delivered fax', {
-				userId,
-				faxId,
-				provider,
-				currencyCode,
-				amountToConsume,
-				isSubscriber: snapshot.isSubscriber
-			});
-		} catch (error) {
-			this.logger.log('ERROR', 'Error deducting credits for delivered fax', {
-				userId,
-				creditsToDeduct,
+			} catch (error) {
+				this.logger.log('ERROR', 'Error deducting credits for delivered fax', {
+					userId,
+					creditsToDeduct,
 				faxId,
 				error: error.message
-			});
+				});
+			}
 		}
+
+	parseMetadataObject(metadata) {
+		if (!metadata) return {};
+		if (typeof metadata === 'string') {
+			try {
+				const parsed = JSON.parse(metadata);
+				return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+			} catch {
+				return {};
+			}
+		}
+		return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
+	}
+
+	extractBillingContextFromFaxMetadata(metadata) {
+		const normalized = this.parseMetadataObject(metadata);
+		const billing = normalized.billing && typeof normalized.billing === 'object' ? normalized.billing : null;
+		if (!billing) return null;
+
+		return {
+			revenueCatCustomerId: billing.revenuecat_customer_id || billing.customer_id || null,
+			activeCurrencyCode: billing.currency_code || null,
+			isSubscriber: billing.is_subscriber === true
+		};
 	}
 
 	/**
@@ -368,12 +409,17 @@ export default class extends WorkerEntrypoint {
 					};
 				}
 
-				const creditSnapshot = await rcClient.getCreditSnapshot(userId);
-				const hasCredits = creditSnapshot.activeCredits >= creditsRequired;
-				
-				if (!hasCredits) {
-					const creditShortage = Math.max(0, creditsRequired - creditSnapshot.activeCredits);
-					this.logger.log('WARN', 'Insufficient credits for fax', {
+					const creditSnapshot = await rcClient.getCreditSnapshot(userId);
+					const hasCredits = creditSnapshot.activeCredits >= creditsRequired;
+					const billingContext = {
+						revenueCatCustomerId: creditSnapshot.customerId || userId,
+						activeCurrencyCode: creditSnapshot.activeCurrencyCode || null,
+						isSubscriber: creditSnapshot.isSubscriber === true
+					};
+					
+					if (!hasCredits) {
+						const creditShortage = Math.max(0, creditsRequired - creditSnapshot.activeCredits);
+						this.logger.log('WARN', 'Insufficient credits for fax', {
 						userId: userId,
 						pages: totalPages,
 						creditPerPage: creditPerPage,
@@ -409,17 +455,25 @@ export default class extends WorkerEntrypoint {
 					isSubscriber: creditSnapshot.isSubscriber
 				});
 			
-			let faxResult;
+				let faxResult;
 
-			if (faxProvider.getProviderName() === 'telnyx') {
-				this.logger.log('INFO', 'Using Telnyx custom workflow');
-				faxResult = await faxProvider.sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired);
-			} else {
-				this.logger.log('INFO', 'Using standard provider workflow');
-				const providerPayload = await faxProvider.buildPayload(faxRequest);
-				faxResult = await faxProvider.sendFax(providerPayload);
-				await this.saveFaxRecordForStandardWorkflow(faxResult, faxRequest, userId, faxProvider.getProviderName(), callerEnvObj, creditsRequired);
-			}
+				if (faxProvider.getProviderName() === 'telnyx') {
+					this.logger.log('INFO', 'Using Telnyx custom workflow');
+					faxResult = await faxProvider.sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired, billingContext);
+				} else {
+					this.logger.log('INFO', 'Using standard provider workflow');
+					const providerPayload = await faxProvider.buildPayload(faxRequest);
+					faxResult = await faxProvider.sendFax(providerPayload);
+					await this.saveFaxRecordForStandardWorkflow(
+						faxResult,
+						faxRequest,
+						userId,
+						faxProvider.getProviderName(),
+						callerEnvObj,
+						creditsRequired,
+						billingContext
+					);
+				}
 
 			if (!faxResult.id) {
 				this.logger.log('ERROR', 'Fax provider did not return a valid fax ID');
@@ -646,7 +700,15 @@ export default class extends WorkerEntrypoint {
 		}
 	}
 
-	async saveFaxRecordForStandardWorkflow(faxResult, faxRequest, userId, providerName, callerEnvObj, creditsRequired = 0) {
+	async saveFaxRecordForStandardWorkflow(
+		faxResult,
+		faxRequest,
+		userId,
+		providerName,
+		callerEnvObj,
+		creditsRequired = 0,
+		billingContext = null
+	) {
 		try {
 			this.logger.log('DEBUG', 'Saving fax record for standard workflow', {
 				userId: userId || 'anonymous',
@@ -658,10 +720,10 @@ export default class extends WorkerEntrypoint {
 			const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
 			const totalPages = faxRequest.files?._totalPages || 1;
 
-			const faxDataForSave = {
-				id: faxResult.id,
-				status: faxResult.status || 'queued',
-				originalStatus: faxResult.originalStatus || 'Submitted',
+				const faxDataForSave = {
+					id: faxResult.id,
+					status: faxResult.status || 'queued',
+					originalStatus: faxResult.originalStatus || 'Submitted',
 				recipients: faxRequest.recipients || [],
 				senderId: faxRequest.senderId,
 				subject: faxRequest.subject || faxRequest.message,
@@ -671,11 +733,19 @@ export default class extends WorkerEntrypoint {
 				clientReference: faxRequest.clientReference || 'SendFaxPro',
 				sentAt: new Date().toISOString(),
 				completedAt: null,
-				errorMessage: null,
-				providerResponse: faxResult.providerResponse,
-				friendlyId: faxResult.friendlyId,
-				apiProvider: providerName
-			};
+					errorMessage: null,
+					providerResponse: faxResult.providerResponse,
+					friendlyId: faxResult.friendlyId,
+					apiProvider: providerName,
+					metadata: billingContext ? {
+						billing: {
+							revenuecat_customer_id: billingContext.revenueCatCustomerId || null,
+							currency_code: billingContext.activeCurrencyCode || null,
+							is_subscriber: billingContext.isSubscriber === true,
+							credits_required: Math.ceil(creditsRequired) || 0
+						}
+					} : {}
+				};
 
 			// Use caller environment for database operations (contains Supabase configuration)
 			const savedFaxRecord = await DatabaseUtils.saveFaxRecord(faxDataForSave, userId, callerEnvObj, this.logger);
@@ -745,10 +815,9 @@ export default class extends WorkerEntrypoint {
 			const standardizedStatus = tempProvider.mapStatus(statusForMapping);
 
 			// Build update data for Supabase - only include fields that exist in the payload
-			const updateData = {
-				status: standardizedStatus,
-				metadata: payload
-			};
+				const updateData = {
+					status: standardizedStatus
+				};
 
 			// Only include original_status if status exists in payload
 			if (statusFromPayload !== null) {
@@ -781,8 +850,18 @@ export default class extends WorkerEntrypoint {
 				updateData.pages = 0;
 			}
 
-			const existingFaxRecord = await DatabaseUtils.getFaxRecord(telnyxFaxId, callerEnvObj, this.logger, 'provider_fax_id');
-			const wasAlreadyDelivered = existingFaxRecord?.status === 'delivered';
+				const existingFaxRecord = await DatabaseUtils.getFaxRecord(telnyxFaxId, callerEnvObj, this.logger, 'provider_fax_id');
+				const wasAlreadyDelivered = existingFaxRecord?.status === 'delivered';
+				const existingMetadata = this.parseMetadataObject(existingFaxRecord?.metadata);
+				const hasExistingMetadata = Object.keys(existingMetadata).length > 0;
+				updateData.metadata = hasExistingMetadata
+					? {
+						...existingMetadata,
+						telnyx_webhook_payload: payload,
+						telnyx_webhook_event: eventType,
+						telnyx_webhook_status: statusFromPayload
+					}
+					: payload;
 
 			// Update fax record using provider_fax_id as lookup key
 			const updatedFaxRecord = await DatabaseUtils.updateFaxRecord(telnyxFaxId, updateData, callerEnvObj, this.logger, 'provider_fax_id');
@@ -831,13 +910,14 @@ export default class extends WorkerEntrypoint {
 				}, callerEnvObj, this.logger);
 				
 				// Deduct credits based on user type (paid vs free)
-				await this.deductCreditsForDeliveredFax(
-					updatedFaxRecord.user_id,
-					creditsToDeduct,
-					updatedFaxRecord.id,
-					callerEnvObj,
-					'telnyx'
-				);
+					await this.deductCreditsForDeliveredFax(
+						updatedFaxRecord.user_id,
+						creditsToDeduct,
+						updatedFaxRecord.id,
+						callerEnvObj,
+						'telnyx',
+						this.extractBillingContextFromFaxMetadata(updatedFaxRecord.metadata)
+					);
 			} else if (standardizedStatus === 'delivered' && wasAlreadyDelivered) {
 				this.logger.log('INFO', 'Skipping delivered accounting for duplicate terminal webhook', {
 					provider: 'telnyx',
@@ -988,20 +1068,29 @@ export default class extends WorkerEntrypoint {
 			}
 
 			// Build update data for Supabase
-			const updateData = {
-				status: standardizedStatus,
-				original_status: statusFromPayload,
-				metadata: payload,
-				completed_at: ['delivered', 'failed', 'cancelled'].includes(standardizedStatus) ? new Date().toISOString() : null
-			};
+				const updateData = {
+					status: standardizedStatus,
+					original_status: statusFromPayload,
+					completed_at: ['delivered', 'failed', 'cancelled'].includes(standardizedStatus) ? new Date().toISOString() : null
+				};
 
 			// Add page count if available and valid in the webhook payload
 			if (pageCount !== null && pageCount !== undefined && pageCount > 0) {
 				updateData.pages = pageCount;
 			}
 
-			const existingFaxRecord = await DatabaseUtils.getFaxRecord(notifyreFaxId, callerEnvObj, this.logger, 'provider_fax_id');
-			const wasAlreadyDelivered = existingFaxRecord?.status === 'delivered';
+				const existingFaxRecord = await DatabaseUtils.getFaxRecord(notifyreFaxId, callerEnvObj, this.logger, 'provider_fax_id');
+				const wasAlreadyDelivered = existingFaxRecord?.status === 'delivered';
+				const existingMetadata = this.parseMetadataObject(existingFaxRecord?.metadata);
+				const hasExistingMetadata = Object.keys(existingMetadata).length > 0;
+				updateData.metadata = hasExistingMetadata
+					? {
+						...existingMetadata,
+						notifyre_webhook_payload: payload,
+						notifyre_webhook_event: eventType,
+						notifyre_webhook_status: statusFromPayload
+					}
+					: payload;
 
 			// Update fax record using provider_fax_id as lookup key
 			const updatedFaxRecord = await DatabaseUtils.updateFaxRecord(notifyreFaxId, updateData, callerEnvObj, this.logger, 'provider_fax_id');
@@ -1039,13 +1128,14 @@ export default class extends WorkerEntrypoint {
 				}, callerEnvObj, this.logger);
 				
 				// Deduct credits based on user type (paid vs free)
-				await this.deductCreditsForDeliveredFax(
-					updatedFaxRecord.user_id,
-					creditsToDeduct,
-					updatedFaxRecord.id,
-					callerEnvObj,
-					'notifyre'
-				);
+					await this.deductCreditsForDeliveredFax(
+						updatedFaxRecord.user_id,
+						creditsToDeduct,
+						updatedFaxRecord.id,
+						callerEnvObj,
+						'notifyre',
+						this.extractBillingContextFromFaxMetadata(updatedFaxRecord.metadata)
+					);
 			} else if (standardizedStatus === 'delivered' && wasAlreadyDelivered) {
 				this.logger.log('INFO', 'Skipping delivered accounting for duplicate terminal webhook', {
 					provider: 'notifyre',

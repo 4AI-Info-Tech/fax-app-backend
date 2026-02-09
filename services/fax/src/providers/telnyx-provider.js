@@ -160,12 +160,12 @@ export class TelnyxProvider {
 	 * @param {string|null} userId - User ID from auth context
 	 * @returns {object} Standardized response
 	 */
-	async sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired = 0) {
+	async sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired = 0, billingContext = null) {
 		try {
 			this.logger.log('INFO', 'Starting Telnyx custom workflow: Save to Supabase → Upload to R2 → Send fax');
 
 			// Step 1: Create initial fax record in Supabase
-			const faxRecord = await this.createInitialFaxRecord(faxRequest, userId, creditsRequired);
+			const faxRecord = await this.createInitialFaxRecord(faxRequest, userId, creditsRequired, billingContext);
 			this.logger.log('INFO', 'Step 1 complete: Fax record saved to Supabase', { faxId: faxRecord.id });
 
 			// Step 2: Upload files to R2 and get public URLs
@@ -202,10 +202,18 @@ export class TelnyxProvider {
 	 * @param {number} creditsRequired - Credit cost for this fax
 	 * @returns {object} Created fax record
 	 */
-	async createInitialFaxRecord(faxRequest, userId, creditsRequired = 0) {
+	async createInitialFaxRecord(faxRequest, userId, creditsRequired = 0, billingContext = null) {
 		// Calculate document count and total pages from files
 		const documentCount = faxRequest.files?._documentCount || (faxRequest.files?.length || 0) || 1;
 		const totalPages = faxRequest.files?._totalPages || 1;
+		const billingMetadata = billingContext && typeof billingContext === 'object'
+			? {
+				revenuecat_customer_id: billingContext.revenueCatCustomerId || null,
+				currency_code: billingContext.activeCurrencyCode || null,
+				is_subscriber: billingContext.isSubscriber === true,
+				credits_required: Math.ceil(creditsRequired) || 0
+			}
+			: null;
 		
 		const faxData = {
 			user_id: userId,
@@ -218,7 +226,8 @@ export class TelnyxProvider {
 			pages: totalPages,
 			document_count: documentCount,
 			cost: Math.ceil(creditsRequired) || 0,
-			created_at: new Date().toISOString()
+			created_at: new Date().toISOString(),
+			metadata: billingMetadata ? { billing: billingMetadata } : {}
 		};
 
 		return await DatabaseUtils.saveFaxRecord(faxData, userId, this.env, this.logger);
@@ -357,9 +366,22 @@ export class TelnyxProvider {
 	 * @param {object} telnyxResponse - Telnyx API response
 	 */
 	async updateFaxRecordWithTelnyxResponse(faxId, telnyxResponse) {
+		let existingMetadata = {};
+		if (typeof DatabaseUtils.getFaxRecord === 'function') {
+			const existingFax = await DatabaseUtils.getFaxRecord(faxId, this.env, this.logger, 'id');
+			existingMetadata = existingFax?.metadata && typeof existingFax.metadata === 'object' && !Array.isArray(existingFax.metadata)
+				? existingFax.metadata
+				: {};
+		}
+		const hasExistingMetadata = Object.keys(existingMetadata).length > 0;
 		const updateData = {
 			provider_fax_id: telnyxResponse.id,
-			metadata: telnyxResponse,
+			metadata: hasExistingMetadata
+				? {
+					...existingMetadata,
+					telnyx_response: telnyxResponse
+				}
+				: telnyxResponse,
 			status: this.mapStatus(telnyxResponse.status),
 			sent_at: new Date().toISOString(),
 			updated_at: new Date().toISOString()

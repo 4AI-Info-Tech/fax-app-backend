@@ -186,16 +186,10 @@ export class RevenueCatClient {
 		return toInteger(balanceMap.get(code), 0);
 	}
 
-	async getCreditSnapshot(customerId) {
-		const normalizedCustomerId = normalizeCustomerId(customerId);
-		const [entitlements, currencies] = await Promise.all([
-			this.listActiveEntitlements(normalizedCustomerId),
-			this.listVirtualCurrencies(normalizedCustomerId)
-		]);
-
+	buildSnapshotFromData(customerId, entitlements, currencies) {
 		const isSubscriber = Array.isArray(entitlements) && entitlements.length > 0;
 		const balanceMap = new Map();
-		for (const currency of currencies) {
+		for (const currency of currencies || []) {
 			balanceMap.set(currency.currencyCode, currency.balance);
 		}
 
@@ -207,7 +201,7 @@ export class RevenueCatClient {
 		const activeCredits = isSubscriber ? proCredits : freeCredits;
 
 		return {
-			customerId: normalizedCustomerId,
+			customerId,
 			isSubscriber,
 			freeCredits,
 			proCredits,
@@ -215,6 +209,19 @@ export class RevenueCatClient {
 			activeCurrencyCode,
 			balances: Object.fromEntries(balanceMap.entries())
 		};
+	}
+
+	async fetchCustomerSnapshot(customerId) {
+		const [entitlements, currencies] = await Promise.all([
+			this.listActiveEntitlements(customerId),
+			this.listVirtualCurrencies(customerId)
+		]);
+		return this.buildSnapshotFromData(customerId, entitlements, currencies);
+	}
+
+	async getCreditSnapshot(customerId) {
+		const normalizedCustomerId = normalizeCustomerId(customerId);
+		return this.fetchCustomerSnapshot(normalizedCustomerId);
 	}
 
 	async applyAdjustments(customerId, adjustments) {
