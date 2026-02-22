@@ -28,6 +28,13 @@ FAX_FILES_BUCKET_PUBLIC_URL = "https://r2-staging.sendfax.pro"
 TELNYX_CONNECTION_ID = "2740858224415605884"
 TELNYX_SENDER_ID = "+18334610414"
 REVENUECAT_PROJECT_ID = "proj7a20ca10"
+TELNYX_ENABLE_FILE_CONVERSION = "false"
+CONVERTER_TIMEOUT_MS = "12000"
+TELNYX_MAX_CONVERSION_FILES = "10"
+
+[[env.staging.services]]
+binding = "CONVERTER_SERVICE"
+service = "converter-service"
 
 [[env.staging.r2_buckets]]
 binding = "FAX_FILES_BUCKET"
@@ -49,6 +56,13 @@ FAX_FILES_BUCKET_PUBLIC_URL = "https://r2.sendfax.pro"
 TELNYX_CONNECTION_ID = "2740858224415605884"
 TELNYX_SENDER_ID = "+18334610414"
 REVENUECAT_PROJECT_ID = "proj7a20ca10"
+TELNYX_ENABLE_FILE_CONVERSION = "false"
+CONVERTER_TIMEOUT_MS = "12000"
+TELNYX_MAX_CONVERSION_FILES = "10"
+
+[[env.prod.services]]
+binding = "CONVERTER_SERVICE"
+service = "converter-service"
 
 [[env.prod.r2_buckets]]
 binding = "FAX_FILES_BUCKET"

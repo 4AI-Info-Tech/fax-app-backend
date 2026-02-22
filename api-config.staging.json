@@ -20,6 +20,10 @@
             "binding": "FAX_SERVICE"
         },
         {
+            "alias": "converter_service",
+            "binding": "CONVERTER_SERVICE"
+        },
+        {
             "alias": "env_test_service",
             "binding": "ENV_TEST_SERVICE"
         },
@@ -79,6 +83,16 @@
                 "function": "sendFax"
             },
             "auth": true
+        },
+        {
+            "method": "GET",
+            "path": "/v1/converter/health",
+            "integration": {
+                "type": "service_binding",
+                "binding": "converter_service",
+                "function": "health"
+            },
+            "auth": false
         },
         {
             "method": "GET",

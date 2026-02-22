@@ -25,6 +25,7 @@ kv_namespaces = [
 
 services = [
   { binding = "FAX_SERVICE", service = "fax-service-staging" },
+  { binding = "CONVERTER_SERVICE", service = "converter-service" },
   { binding = "ENV_TEST_SERVICE", service = "env-test-service-staging" },
   { binding = "REVENUECAT_SERVICE", service = "revenuecat-service-staging" },
   { binding = "MANAGEMENT_SERVICE", service = "management-service-staging" },
@@ -41,6 +42,9 @@ TELNYX_SENDER_ID = "+18334610414"
 ADMOB_SKIP_VERIFICATION = "true"
 ONESIGNAL_APP_ID = "aa96539a-1aec-4801-b4b0-81cca3510d48"
 REVENUECAT_PROJECT_ID = "proj7a20ca10"
+TELNYX_ENABLE_FILE_CONVERSION = "false"
+CONVERTER_TIMEOUT_MS = "12000"
+TELNYX_MAX_CONVERSION_FILES = "10"
 
 [env.staging.observability]
 enabled = true
@@ -57,6 +61,7 @@ kv_namespaces = [
 
 services = [
   { binding = "FAX_SERVICE", service = "fax-service-prod" },
+  { binding = "CONVERTER_SERVICE", service = "converter-service" },
   { binding = "ENV_TEST_SERVICE", service = "env-test-service-prod" },
   { binding = "REVENUECAT_SERVICE", service = "revenuecat-service-prod" },
   { binding = "MANAGEMENT_SERVICE", service = "management-service-prod" },
@@ -71,6 +76,9 @@ FAX_PROVIDER = "telynx"
 TELNYX_CONNECTION_ID = "2751644625826481977"
 TELNYX_SENDER_ID = "+18886720329"
 REVENUECAT_PROJECT_ID = "proj7a20ca10"
+TELNYX_ENABLE_FILE_CONVERSION = "false"
+CONVERTER_TIMEOUT_MS = "12000"
+TELNYX_MAX_CONVERSION_FILES = "10"
 
 [env.prod.observability]
 enabled = true

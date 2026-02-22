@@ -138,11 +138,19 @@ deploy_service() {
   local service_name=$(basename "$service_path")
   
   echo -e "${BLUE}Deploying service: $service_name${NC}"
-  
-  if [ -z "$env" ]; then
+
+  # Converter runs as a single shared service for all environments.
+  if [ "$service_name" = "converter" ]; then
+    if [ -n "$env" ]; then
+      echo -e "${YELLOW}Converter is shared across staging/prod - deploying once without --env${NC}"
+    fi
     (cd "$service_path" && npx wrangler deploy)
   else
-    (cd "$service_path" && npx wrangler deploy --env "$env")
+    if [ -z "$env" ]; then
+      (cd "$service_path" && npx wrangler deploy)
+    else
+      (cd "$service_path" && npx wrangler deploy --env "$env")
+    fi
   fi
   
   if [ $? -eq 0 ]; then
@@ -215,6 +223,8 @@ echo -e "${BLUE}Environment: ${ENV:-default}${NC}"
 echo -e "${BLUE}Deploy All Services: ${DEPLOY_ALL:-false}${NC}"
 echo -e "${BLUE}Deploy Main Worker: ${DEPLOY_WORKER}${NC}"
 echo -e "${BLUE}Skip Tests: $SKIP_TESTS${NC}"
+echo -e "${BLUE}Converter vars (for Telnyx conversion): CONVERTER_TIMEOUT_MS, TELNYX_MAX_CONVERSION_FILES${NC}"
+echo -e "${BLUE}Converter deployment mode: shared single service (converter-service)${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
 # Run tests first (unless skipped)
@@ -290,4 +300,3 @@ fi
 echo -e "${GREEN}===========================================${NC}"
 echo -e "${GREEN}🎉 All deployments completed successfully!${NC}"
 echo -e "${GREEN}===========================================${NC}"
-

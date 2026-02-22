@@ -41,7 +41,10 @@ In your RevenueCat dashboard:
 
 1. Go to **Project Settings** > **Webhooks**
 2. Click **Add Webhook**
-3. Set the webhook URL to: `https://your-api-domain.com/v1/revenuecat/webhook`
+3. Set the webhook URL to the API Gateway endpoint:
+   - Staging: `https://api-staging.sendfax.pro/v1/revenuecat/webhook`
+   - Production: `https://api.sendfax.pro/v1/revenuecat/webhook`
+   - Do not point RevenueCat to the internal `revenuecat-service-*` worker directly
 4. Select the events you want to receive:
    - `INITIAL_PURCHASE`
    - `RENEWAL`
@@ -159,6 +162,7 @@ WHERE subscription_status IS NOT NULL;
 ### Common Issues
 
 1. **Webhook not received**: Check the webhook URL and ensure it's publicly accessible
+   - Use API Gateway URL (`/v1/revenuecat/webhook`) instead of service worker URL
 2. **Database errors**: Verify Supabase configuration and service role key
 3. **Authentication errors**: Ensure JWT tokens are valid for protected endpoints
 4. **Signature verification failures**: Check webhook secret configuration

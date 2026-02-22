@@ -19,6 +19,7 @@ describe('TelnyxProvider', () => {
 	let mockLogger;
 	let mockR2Utils;
 	let mockEnv;
+	const validPdfBase64 = Buffer.from('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n').toString('base64');
 
 	beforeEach(() => {
 		// Mock logger
@@ -139,7 +140,7 @@ describe('TelnyxProvider', () => {
 				recipients: ['+1234567890'],
 				senderId: '+1987654321',
 				files: [
-					{ data: 'base64data', filename: 'test.pdf' }
+					{ data: validPdfBase64, filename: 'test.pdf', mimeType: 'application/pdf' }
 				],
 				message: 'Test fax'
 			};
@@ -270,13 +271,45 @@ describe('TelnyxProvider', () => {
 				mockLogger
 			);
 		});
+
+		it('should persist conversion summary metadata when present', async () => {
+			const faxRequest = {
+				recipients: ['+1234567890'],
+				files: [{ data: 'test' }],
+				conversionSummary: {
+					total_files: 1,
+					converted_count: 1,
+					passthrough_count: 0,
+					duration_ms: 32,
+					result: 'success'
+				}
+			};
+
+			await telnyxProvider.createInitialFaxRecord(faxRequest, 'user-123', 3, {
+				revenueCatCustomerId: 'rc-user-1',
+				activeCurrencyCode: 'USD',
+				isSubscriber: true
+			});
+
+			expect(DatabaseUtils.saveFaxRecord).toHaveBeenCalledWith(
+				expect.objectContaining({
+					metadata: expect.objectContaining({
+						billing: expect.any(Object),
+						file_conversion: faxRequest.conversionSummary
+					})
+				}),
+				'user-123',
+				mockEnv,
+				mockLogger
+			);
+		});
 	});
 
 	describe('uploadFilesToR2', () => {
 		it('should upload all files and return URLs', async () => {
 			const files = [
-				{ data: 'base64data1', filename: 'file1.pdf' },
-				{ data: 'base64data2', filename: 'file2.pdf' }
+				{ data: validPdfBase64, filename: 'file1.pdf', mimeType: 'application/pdf' },
+				{ data: validPdfBase64, filename: 'file2.pdf', mimeType: 'application/pdf' }
 			];
 			const faxId = 'test-fax-123';
 
@@ -295,7 +328,9 @@ describe('TelnyxProvider', () => {
 
 		it('should handle Blob files', async () => {
 			const mockBlob = {
-				arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(4))
+				name: 'blob-file.pdf',
+				type: 'application/pdf',
+				arrayBuffer: vi.fn().mockResolvedValue(Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x2d]).buffer)
 			};
 			const files = [mockBlob];
 			const faxId = 'test-fax-123';
@@ -305,13 +340,13 @@ describe('TelnyxProvider', () => {
 			expect(mockBlob.arrayBuffer).toHaveBeenCalled();
 			expect(mockR2Utils.uploadFile).toHaveBeenCalledWith(
 				expect.stringContaining('fax/test-fax-123/document_1_'),
-				expect.any(ArrayBuffer),
+				expect.any(Uint8Array),
 				'application/pdf'
 			);
 		});
 
 		it('should handle base64 encoded files', async () => {
-			const files = [{ data: 'dGVzdA==' }]; // base64 for "test"
+			const files = [{ data: validPdfBase64, filename: 'upload.pdf', mimeType: 'application/pdf' }];
 			const faxId = 'test-fax-123';
 
 			await telnyxProvider.uploadFilesToR2(files, faxId);
@@ -320,6 +355,33 @@ describe('TelnyxProvider', () => {
 				expect.any(String),
 				expect.any(Uint8Array),
 				'application/pdf'
+			);
+		});
+
+		it('should reject files that claim to be PDF but are not PDF bytes', async () => {
+			const files = [{
+				data: Buffer.from('not-a-pdf').toString('base64'),
+				filename: 'broken.pdf',
+				mimeType: 'application/pdf'
+			}];
+
+			await expect(telnyxProvider.uploadFilesToR2(files, 'fax-123'))
+				.rejects.toThrow('Invalid PDF content for file 1');
+		});
+
+		it('should preserve non-PDF extension and MIME type instead of relabeling as PDF', async () => {
+			const files = [{
+				data: Buffer.from('docx-binary-placeholder').toString('base64'),
+				filename: 'contract.docx',
+				mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+			}];
+
+			await telnyxProvider.uploadFilesToR2(files, 'fax-123');
+
+			expect(mockR2Utils.uploadFile).toHaveBeenCalledWith(
+				expect.stringMatching(/fax\/fax-123\/document_1_\d+\.docx$/),
+				expect.any(Uint8Array),
+				'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 			);
 		});
 

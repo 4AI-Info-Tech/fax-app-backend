@@ -39,6 +39,22 @@ export class DatabaseUtils {
 		return uuidRegex.test(str);
 	}
 
+	/**
+	 * Normalize UUID to canonical lowercase representation.
+	 * @param {string} value
+	 * @returns {string|null}
+	 */
+	static normalizeUUID(value) {
+		if (!value || typeof value !== 'string') {
+			return null;
+		}
+		const trimmed = value.trim();
+		if (!DatabaseUtils.isValidUUID(trimmed)) {
+			return null;
+		}
+		return trimmed.toLowerCase();
+	}
+
 	static isSupabaseConfigured(env) {
 		return Boolean(env?.SUPABASE_URL && env?.SUPABASE_SERVICE_ROLE_KEY);
 	}
@@ -213,22 +229,34 @@ export class DatabaseUtils {
 				return { success: false, error: 'Missing user IDs' };
 			}
 
-			if (fromUserId === toUserId) {
-				return { success: true, message: 'No transfer needed', fromUserId, toUserId };
+			const normalizedFromUserId = DatabaseUtils.normalizeUUID(fromUserId);
+			const normalizedToUserId = DatabaseUtils.normalizeUUID(toUserId);
+
+			if (!normalizedFromUserId || !normalizedToUserId) {
+				return {
+					success: false,
+					error: 'Transfer user IDs must be valid UUIDs',
+					fromUserId,
+					toUserId
+				};
+			}
+
+			if (normalizedFromUserId === normalizedToUserId) {
+				return { success: true, message: 'No transfer needed', fromUserId: normalizedFromUserId, toUserId: normalizedToUserId };
 			}
 
 			const supabase = DatabaseUtils.getSupabaseAdminClient(env);
-			const validation = await DatabaseUtils.validateUsersForTransfer(fromUserId, toUserId, env, logger);
+			const validation = await DatabaseUtils.validateUsersForTransfer(normalizedFromUserId, normalizedToUserId, env, logger);
 			if (!validation.valid) {
 				return { success: false, error: validation.error };
 			}
 
-			const transferId = await DatabaseUtils.createTransferAuditRecord(fromUserId, toUserId, transferReason, env, logger);
+			const transferId = await DatabaseUtils.createTransferAuditRecord(normalizedFromUserId, normalizedToUserId, transferReason, env, logger);
 
 			const transferResult = {
 				success: true,
-				fromUserId,
-				toUserId,
+				fromUserId: normalizedFromUserId,
+				toUserId: normalizedToUserId,
 				transferId,
 				transferredSubscriptions: 0,
 				transferredUsage: 0,
@@ -240,43 +268,43 @@ export class DatabaseUtils {
 			transferResult.transferredFaxes = await DatabaseUtils.moveRowsByUserId(
 				supabase,
 				'faxes',
-				fromUserId,
-				toUserId,
+				normalizedFromUserId,
+				normalizedToUserId,
 				logger
 			);
 
 			transferResult.transferredUsage = await DatabaseUtils.moveRowsByUserId(
 				supabase,
 				'usage',
-				fromUserId,
-				toUserId,
+				normalizedFromUserId,
+				normalizedToUserId,
 				logger
 			);
 
 			transferResult.transferredWebhookEvents = await DatabaseUtils.moveRowsByUserId(
 				supabase,
 				'revenuecat_webhook_events',
-				fromUserId,
-				toUserId,
+				normalizedFromUserId,
+				normalizedToUserId,
 				logger
 			);
 
 			try {
-				const { data: oldUser, error: userError } = await supabase.auth.admin.getUserById(fromUserId);
+				const { data: oldUser, error: userError } = await supabase.auth.admin.getUserById(normalizedFromUserId);
 				if (!userError && oldUser?.user?.app_metadata?.is_anonymous === true) {
-					const { error: deleteError } = await supabase.auth.admin.deleteUser(fromUserId);
+					const { error: deleteError } = await supabase.auth.admin.deleteUser(normalizedFromUserId);
 					if (!deleteError) {
 						transferResult.oldUserDeleted = true;
 					} else {
 						logger.log('WARN', 'Failed to delete anonymous source user after transfer', {
-							fromUserId,
+							fromUserId: normalizedFromUserId,
 							error: deleteError.message
 						});
 					}
 				}
 			} catch (userCleanupError) {
 				logger.log('WARN', 'Error while cleaning up source user after transfer', {
-					fromUserId,
+					fromUserId: normalizedFromUserId,
 					error: userCleanupError.message
 				});
 			}
@@ -345,19 +373,25 @@ export class DatabaseUtils {
 
 	static async validateUsersForTransfer(fromUserId, toUserId, env, logger) {
 		try {
-			const supabase = DatabaseUtils.getSupabaseAdminClient(env);
-			const { data: fromUser, error: fromError } = await supabase.auth.admin.getUserById(fromUserId);
-			if (fromError || !fromUser?.user) {
-				return { valid: false, error: `Source user ${fromUserId} does not exist` };
+			const normalizedFromUserId = DatabaseUtils.normalizeUUID(fromUserId);
+			const normalizedToUserId = DatabaseUtils.normalizeUUID(toUserId);
+			if (!normalizedFromUserId || !normalizedToUserId) {
+				return { valid: false, error: 'Transfer user IDs must be valid UUIDs' };
 			}
 
-			const { data: toUser, error: toError } = await supabase.auth.admin.getUserById(toUserId);
+			const supabase = DatabaseUtils.getSupabaseAdminClient(env);
+			const { data: fromUser, error: fromError } = await supabase.auth.admin.getUserById(normalizedFromUserId);
+			if (fromError || !fromUser?.user) {
+				return { valid: false, error: `Source user ${normalizedFromUserId} does not exist` };
+			}
+
+			const { data: toUser, error: toError } = await supabase.auth.admin.getUserById(normalizedToUserId);
 			if (toError || !toUser?.user) {
-				return { valid: false, error: `Target user ${toUserId} does not exist` };
+				return { valid: false, error: `Target user ${normalizedToUserId} does not exist` };
 			}
 
 			if (toUser.user.app_metadata?.is_anonymous === true) {
-				return { valid: false, error: `Cannot transfer to anonymous user ${toUserId}` };
+				return { valid: false, error: `Cannot transfer to anonymous user ${normalizedToUserId}` };
 			}
 
 			return { valid: true };

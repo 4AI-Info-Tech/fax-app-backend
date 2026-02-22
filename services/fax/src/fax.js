@@ -11,6 +11,8 @@ import { R2Utils } from './r2-utils.js';
 import { NotificationService } from './notifications.js';
 import { digitsOnly, calculateRate, getRateTables, calculateCreditPerPage } from './rates.js';
 import { RevenueCatClient } from '../../shared/revenuecat-client.js';
+import { ConversionClient, ConversionClientError } from './conversion-client.js';
+import { classifyForTelnyx, extractFileExtension } from './file-type-policy.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -348,6 +350,299 @@ export default class extends WorkerEntrypoint {
 		return normalizedProvider;
 	}
 
+	parseBooleanFlag(value, defaultValue = false) {
+		if (typeof value === 'boolean') return value;
+		if (typeof value !== 'string') return defaultValue;
+		const normalized = value.trim().toLowerCase();
+		return ['1', 'true', 'yes', 'on'].includes(normalized);
+	}
+
+	getNumericEnvValue(value, fallback) {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+	}
+
+	isPdfBytes(bytes) {
+		if (!bytes || bytes.length < 5) return false;
+		return (
+			bytes[0] === 0x25 && // %
+			bytes[1] === 0x50 && // P
+			bytes[2] === 0x44 && // D
+			bytes[3] === 0x46 && // F
+			bytes[4] === 0x2d // -
+		);
+	}
+
+	async readFileBytes(file) {
+		if (file instanceof Blob || (typeof File !== 'undefined' && file instanceof File) || (file && typeof file.arrayBuffer === 'function')) {
+			return new Uint8Array(await file.arrayBuffer());
+		}
+		if (file?.data) {
+			if (typeof atob === 'function') {
+				return Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
+			}
+			return new Uint8Array(Buffer.from(file.data, 'base64'));
+		}
+		if (file instanceof Uint8Array) {
+			return file;
+		}
+		if (file instanceof ArrayBuffer) {
+			return new Uint8Array(file);
+		}
+		throw new ConversionClientError('conversion_failed', 'Unsupported file payload format');
+	}
+
+	async normalizeFilesForTelnyx(faxRequest, callerEnvObj) {
+		const files = Array.isArray(faxRequest.files) ? faxRequest.files : [];
+		const maxFiles = this.getNumericEnvValue(callerEnvObj.TELNYX_MAX_CONVERSION_FILES, 10);
+		const conversionTimeoutMs = this.getNumericEnvValue(callerEnvObj.CONVERTER_TIMEOUT_MS, 12000);
+		const totalTimeoutMs = 15000;
+		const startedAt = Date.now();
+
+		if (files.length > maxFiles) {
+			return {
+				success: false,
+				failedFiles: [{
+					index: -1,
+					filename: null,
+					mimeType: null,
+					reason: 'conversion_file_limit_exceeded'
+				}],
+				summary: {
+					total_files: files.length,
+					converted_count: 0,
+					passthrough_count: 0,
+					duration_ms: Date.now() - startedAt,
+					result: 'failed'
+				}
+			};
+		}
+
+		const converter = new ConversionClient({
+			...callerEnvObj,
+			CONVERTER_SERVICE: this.env?.CONVERTER_SERVICE
+		}, this.logger);
+		const normalizedFiles = [];
+		const failedFiles = [];
+		const summaryEntries = [];
+		let totalPages = 0;
+		let convertedCount = 0;
+		let passthroughCount = 0;
+
+		for (let i = 0; i < files.length; i++) {
+			if ((Date.now() - startedAt) >= totalTimeoutMs) {
+				failedFiles.push({
+					index: i,
+					filename: files[i]?.name || files[i]?.filename || null,
+					mimeType: files[i]?.type || files[i]?.mimeType || null,
+					reason: 'timeout'
+				});
+				break;
+			}
+
+			const file = files[i];
+			const filename = file?.name || file?.filename || `document_${i + 1}`;
+			const mimeType = file?.type || file?.mimeType || 'application/octet-stream';
+			const extension = extractFileExtension(filename, mimeType);
+			const classification = classifyForTelnyx(filename, mimeType);
+			const fileStartedAt = Date.now();
+
+			try {
+				if (classification === 'reject') {
+					failedFiles.push({
+						index: i,
+						filename,
+						mimeType,
+						reason: 'unsupported_type'
+					});
+					summaryEntries.push({
+						index: i,
+						filename,
+						input_type: extension || 'unknown',
+						conversion_path: 'reject',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'failed'
+					});
+					this.logger.log('WARN', 'Telnyx file normalization result', {
+						index: i,
+						filename,
+						input_type: extension || 'unknown',
+						conversion_path: 'reject',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'failed'
+					});
+					continue;
+				}
+
+				if (classification === 'ios_local') {
+					failedFiles.push({
+						index: i,
+						filename,
+						mimeType,
+						reason: 'requires_client_side_pdf_conversion'
+					});
+					summaryEntries.push({
+						index: i,
+						filename,
+						input_type: extension || 'unknown',
+						conversion_path: 'ios',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'failed'
+					});
+					this.logger.log('WARN', 'Telnyx file normalization result', {
+						index: i,
+						filename,
+						input_type: extension || 'unknown',
+						conversion_path: 'ios',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'failed'
+					});
+					continue;
+				}
+
+				if (classification === 'pass') {
+					const inputBytes = await this.readFileBytes(file);
+					if (!this.isPdfBytes(inputBytes)) {
+						failedFiles.push({
+							index: i,
+							filename,
+							mimeType,
+							reason: 'invalid_pdf_content'
+						});
+						summaryEntries.push({
+							index: i,
+							filename,
+							input_type: extension || 'pdf',
+							conversion_path: 'pass',
+							duration_ms: Date.now() - fileStartedAt,
+							result: 'failed'
+						});
+						this.logger.log('WARN', 'Telnyx file normalization result', {
+							index: i,
+							filename,
+							input_type: extension || 'pdf',
+							conversion_path: 'pass',
+							duration_ms: Date.now() - fileStartedAt,
+							result: 'failed',
+							reason: 'invalid_pdf_content'
+						});
+						continue;
+					}
+
+					const pageCount = file?.pageCount || file?.page_count || 1;
+					totalPages += Number.isFinite(Number(pageCount)) && Number(pageCount) > 0 ? Number(pageCount) : 1;
+					passthroughCount += 1;
+					normalizedFiles.push(file);
+					summaryEntries.push({
+						index: i,
+						filename,
+						input_type: extension || 'pdf',
+						conversion_path: 'pass',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'success'
+					});
+					this.logger.log('INFO', 'Telnyx file normalization result', {
+						index: i,
+						filename,
+						input_type: extension || 'pdf',
+						conversion_path: 'pass',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'success'
+					});
+					continue;
+				}
+
+				const inputBytes = await this.readFileBytes(file);
+
+				const converted = await converter.convertToPdf({
+					bytes: inputBytes,
+					filename,
+					mimeType,
+					timeoutMs: conversionTimeoutMs
+				});
+
+				const blob = new Blob([converted.pdfBytes], { type: 'application/pdf' });
+				blob.name = converted.outputFilename;
+				blob.filename = converted.outputFilename;
+				blob.pageCount = converted.pageCount;
+
+				normalizedFiles.push(blob);
+				totalPages += converted.pageCount;
+				convertedCount += 1;
+
+				summaryEntries.push({
+					index: i,
+					filename,
+					input_type: extension || 'unknown',
+					conversion_path: 'container',
+					duration_ms: Date.now() - fileStartedAt,
+					result: 'success'
+				});
+				this.logger.log('INFO', 'Telnyx file normalization result', {
+					index: i,
+					filename,
+					input_type: extension || 'unknown',
+					conversion_path: 'container',
+					duration_ms: Date.now() - fileStartedAt,
+					result: 'success'
+				});
+			} catch (error) {
+				const reason = error instanceof ConversionClientError
+					? error.code
+					: (typeof error?.code === 'string' ? error.code : 'conversion_failed');
+				failedFiles.push({
+					index: i,
+					filename,
+					mimeType,
+					reason
+				});
+				summaryEntries.push({
+					index: i,
+					filename,
+					input_type: extension || 'unknown',
+					conversion_path: 'container',
+					duration_ms: Date.now() - fileStartedAt,
+					result: 'failed'
+				});
+				this.logger.log('WARN', 'Telnyx file normalization result', {
+					index: i,
+					filename,
+					input_type: extension || 'unknown',
+					conversion_path: 'container',
+					duration_ms: Date.now() - fileStartedAt,
+					result: 'failed',
+					reason
+				});
+			}
+		}
+
+		const summary = {
+			total_files: files.length,
+			converted_count: convertedCount,
+			passthrough_count: passthroughCount,
+			duration_ms: Date.now() - startedAt,
+			result: failedFiles.length > 0 ? 'failed' : 'success',
+			files: summaryEntries
+		};
+
+		if (failedFiles.length > 0) {
+			return {
+				success: false,
+				failedFiles,
+				summary
+			};
+		}
+
+		normalizedFiles._totalPages = totalPages || 1;
+		normalizedFiles._documentCount = normalizedFiles.length || 1;
+
+		return {
+			success: true,
+			files: normalizedFiles,
+			summary
+		};
+	}
+
 	async sendFax(request, caller_env, sagContext) {
 		try {
 			// Ensure we have usable objects regardless of whether inputs are strings
@@ -380,6 +675,31 @@ export default class extends WorkerEntrypoint {
 					message: 'Authentication required',
 					timestamp: new Date().toISOString()
 				};
+			}
+
+			const isTelnyxProvider = faxProvider.getProviderName() === 'telnyx';
+			const isConversionEnabled = this.parseBooleanFlag(callerEnvObj.TELNYX_ENABLE_FILE_CONVERSION, true);
+
+			if (isTelnyxProvider && isConversionEnabled) {
+				this.logger.log('INFO', 'Starting Telnyx file normalization pipeline');
+				const normalizationResult = await this.normalizeFilesForTelnyx(faxRequest, callerEnvObj);
+				if (!normalizationResult.success) {
+					this.logger.log('WARN', 'Telnyx file normalization failed', {
+						failedFileCount: normalizationResult.failedFiles.length
+					});
+					return {
+						statusCode: 422,
+						error: 'File conversion failed',
+						message: 'One or more files could not be converted to PDF',
+						data: {
+							failedFiles: normalizationResult.failedFiles
+						},
+						timestamp: new Date().toISOString()
+					};
+				}
+
+				faxRequest.files = normalizationResult.files;
+				faxRequest.conversionSummary = normalizationResult.summary;
 			}
 			
 			// Calculate total pages and document count from files
