@@ -434,12 +434,12 @@ describe('Fax Service', () => {
 			const telnyxEnv = {
 				...mockEnv,
 				FAX_PROVIDER: 'telnyx',
-					TELNYX_API_KEY: 'test-telnyx-key',
-					TELNYX_CONNECTION_ID: 'test-connection-id',
-					TELNYX_ENABLE_FILE_CONVERSION: 'true',
-					FAX_FILES_BUCKET: { put: vi.fn(), get: vi.fn(), name: 'test-bucket' },
-					CLOUDFLARE_ACCOUNT_ID: 'test-account-id'
-				};
+				TELNYX_API_KEY: 'test-telnyx-key',
+				TELNYX_CONNECTION_ID: 'test-connection-id',
+				TELNYX_ENABLE_FILE_CONVERSION: 'true',
+				FAX_FILES_BUCKET: { put: vi.fn(), get: vi.fn(), name: 'test-bucket' },
+				CLOUDFLARE_ACCOUNT_ID: 'test-account-id'
+			};
 
 			const request = new Request('https://api.sendfax.pro/v1/fax/send', {
 				method: 'POST',
@@ -459,6 +459,78 @@ describe('Fax Service', () => {
 			const result = await faxService.sendFax(request, telnyxEnv, mockSagContext);
 			expect(result.statusCode).toBe(200);
 			expect(mockConvertToPdf).toHaveBeenCalledTimes(1);
+		});
+
+		it('should canonicalize ppt, pptx, and odt MIME types before conversion', async () => {
+			const telnyxEnv = {
+				...mockEnv,
+				FAX_PROVIDER: 'telnyx',
+				TELNYX_API_KEY: 'test-telnyx-key',
+				TELNYX_CONNECTION_ID: 'test-connection-id',
+				TELNYX_ENABLE_FILE_CONVERSION: 'true',
+				FAX_FILES_BUCKET: { put: vi.fn(), get: vi.fn(), name: 'test-bucket' },
+				CLOUDFLARE_ACCOUNT_ID: 'test-account-id'
+			};
+
+			const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					recipient: '+1234567890',
+					files: [
+						{ filename: 'deck.ppt', data: 'dGVzdA==', mimeType: 'application/octet-stream' },
+						{ filename: 'slides.pptx', data: 'dGVzdA==', mimeType: 'application/octet-stream' },
+						{ filename: 'document.odt', data: 'dGVzdA==', mimeType: 'application/x-vnd.oasis.opendocument.text; charset=binary' }
+					]
+				})
+			});
+
+			const result = await faxService.sendFax(request, telnyxEnv, mockSagContext);
+			expect(result.statusCode).toBe(200);
+			expect(mockConvertToPdf).toHaveBeenCalledTimes(3);
+			expect(mockConvertToPdf).toHaveBeenNthCalledWith(1, expect.objectContaining({
+				filename: 'deck.ppt',
+				mimeType: 'application/vnd.ms-powerpoint'
+			}));
+			expect(mockConvertToPdf).toHaveBeenNthCalledWith(2, expect.objectContaining({
+				filename: 'slides.pptx',
+				mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+			}));
+			expect(mockConvertToPdf).toHaveBeenNthCalledWith(3, expect.objectContaining({
+				filename: 'document.odt',
+				mimeType: 'application/vnd.oasis.opendocument.text'
+			}));
+		});
+
+		it('should still convert backend-convert formats when conversion flag is false', async () => {
+			const telnyxEnv = {
+				...mockEnv,
+				FAX_PROVIDER: 'telnyx',
+				TELNYX_API_KEY: 'test-telnyx-key',
+				TELNYX_CONNECTION_ID: 'test-connection-id',
+				TELNYX_ENABLE_FILE_CONVERSION: 'false',
+				FAX_FILES_BUCKET: { put: vi.fn(), get: vi.fn(), name: 'test-bucket' },
+				CLOUDFLARE_ACCOUNT_ID: 'test-account-id'
+			};
+
+			const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					recipient: '+1234567890',
+					files: [
+						{ filename: 'document.odt', data: 'dGVzdA==', mimeType: 'application/octet-stream' }
+					]
+				})
+			});
+
+			const result = await faxService.sendFax(request, telnyxEnv, mockSagContext);
+			expect(result.statusCode).toBe(200);
+			expect(mockConvertToPdf).toHaveBeenCalledTimes(1);
+			expect(mockConvertToPdf).toHaveBeenCalledWith(expect.objectContaining({
+				filename: 'document.odt',
+				mimeType: 'application/vnd.oasis.opendocument.text'
+			}));
 		});
 
 		it('should normalize office files for Telnyx by default when flag is missing', async () => {

@@ -19,9 +19,24 @@ describe('file-type-policy', () => {
 		expect(classifyForTelnyx('document.ods', 'application/vnd.oasis.opendocument.spreadsheet')).toBe('backend_convert');
 	});
 
+	it('classifies Apple iWork formats as backend conversion formats', () => {
+		expect(classifyForTelnyx('presentation.key', 'application/vnd.apple.keynote')).toBe('backend_convert');
+		expect(classifyForTelnyx('document.pages', 'application/vnd.apple.pages')).toBe('backend_convert');
+	});
+
 	it('falls back to MIME type extension when filename has no extension', () => {
 		expect(extractFileExtension('document', 'application/pdf')).toBe('pdf');
 		expect(classifyForTelnyx('document', 'application/pdf')).toBe('pass');
+	});
+
+	it('normalizes MIME variants for ppt and odt backend conversion types', () => {
+		expect(classifyForTelnyx('slides', 'application/x-mspowerpoint; charset=binary')).toBe('backend_convert');
+		expect(classifyForTelnyx('letter', 'application/x-vnd.oasis.opendocument.text')).toBe('backend_convert');
+	});
+
+	it('extracts clean extensions from signed URLs and query parameters', () => {
+		expect(extractFileExtension('slides.pptx?token=abc', 'application/octet-stream')).toBe('pptx');
+		expect(extractFileExtension('notes.odt#preview', 'application/octet-stream')).toBe('odt');
 	});
 
 	it('rejects unsupported types', () => {

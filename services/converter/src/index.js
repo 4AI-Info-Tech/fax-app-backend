@@ -10,8 +10,18 @@ const SUPPORTED_MIME_TYPES = new Set([
 	'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 	'application/vnd.oasis.opendocument.text',
 	'application/vnd.oasis.opendocument.spreadsheet',
+	'application/vnd.apple.keynote',
+	'application/vnd.apple.pages',
 	'application/pdf'
 ]);
+
+const MIME_NORMALIZATION_ALIASES = {
+	'application/x-vnd.oasis.opendocument.text': 'application/vnd.oasis.opendocument.text',
+	'application/x-vnd.oasis.opendocument.spreadsheet': 'application/vnd.oasis.opendocument.spreadsheet',
+	'application/mspowerpoint': 'application/vnd.ms-powerpoint',
+	'application/powerpoint': 'application/vnd.ms-powerpoint',
+	'application/x-mspowerpoint': 'application/vnd.ms-powerpoint'
+};
 
 function toJsonResponse(payload, status = 200) {
 	return new Response(JSON.stringify(payload), {
@@ -45,6 +55,12 @@ function parseMaxInputBytes(value, fallback = 100 * 1024 * 1024) {
 function parseRetryCount(value, fallback = 2) {
 	const parsed = Number(value);
 	return Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, 5) : fallback;
+}
+
+function normalizeMimeType(mimeType = '') {
+	const baseMimeType = String(mimeType || '').split(';')[0].trim().toLowerCase();
+	if (!baseMimeType) return '';
+	return MIME_NORMALIZATION_ALIASES[baseMimeType] || baseMimeType;
 }
 
 function normalizeEnv(sourceEnv) {
@@ -315,8 +331,8 @@ export class ConvertXContainer extends Container {
 }
 
 export default class extends WorkerEntrypoint {
-	getContainer() {
-		return getRandom(this.env.CONVERTX_CONTAINER);
+	async getContainer() {
+		return await getRandom(this.env.CONVERTX_CONTAINER);
 	}
 
 	async fetch(request, runtimeEnv = env) {
@@ -379,7 +395,7 @@ export default class extends WorkerEntrypoint {
 		}
 
 		const filename = payload?.filename || 'document';
-		const mimeType = (payload?.mimeType || '').toLowerCase();
+		const mimeType = normalizeMimeType(payload?.mimeType || '');
 		const fileData = payload?.fileData;
 		if (!fileData || typeof fileData !== 'string') {
 			return {
@@ -449,7 +465,7 @@ export default class extends WorkerEntrypoint {
 		}
 
 		try {
-			const container = this.getContainer();
+			const container = await this.getContainer();
 			const candidatePaths = buildConvertXPathCandidates(routePrefix);
 			let lastError = null;
 

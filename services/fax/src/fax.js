@@ -12,7 +12,7 @@ import { NotificationService } from './notifications.js';
 import { digitsOnly, calculateRate, getRateTables, calculateCreditPerPage } from './rates.js';
 import { RevenueCatClient } from '../../shared/revenuecat-client.js';
 import { ConversionClient, ConversionClientError } from './conversion-client.js';
-import { classifyForTelnyx, extractFileExtension } from './file-type-policy.js';
+import { classifyForTelnyx, extractFileExtension, getMimeTypeForExtension, normalizeMimeType } from './file-type-policy.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -392,6 +392,17 @@ export default class extends WorkerEntrypoint {
 		throw new ConversionClientError('conversion_failed', 'Unsupported file payload format');
 	}
 
+	requiresBackendConversionForTelnyx(files = []) {
+		if (!Array.isArray(files) || files.length === 0) return false;
+		return files.some((file, index) => {
+			const filename = file?.name || file?.filename || `document_${index + 1}`;
+			const claimedMimeType = normalizeMimeType(file?.type || file?.mimeType || '');
+			const extension = extractFileExtension(filename, claimedMimeType);
+			const mimeType = getMimeTypeForExtension(extension) || claimedMimeType || 'application/octet-stream';
+			return classifyForTelnyx(filename, mimeType) === 'backend_convert';
+		});
+	}
+
 	async normalizeFilesForTelnyx(faxRequest, callerEnvObj) {
 		const files = Array.isArray(faxRequest.files) ? faxRequest.files : [];
 		const maxFiles = this.getNumericEnvValue(callerEnvObj.TELNYX_MAX_CONVERSION_FILES, 10);
@@ -442,8 +453,9 @@ export default class extends WorkerEntrypoint {
 
 			const file = files[i];
 			const filename = file?.name || file?.filename || `document_${i + 1}`;
-			const mimeType = file?.type || file?.mimeType || 'application/octet-stream';
-			const extension = extractFileExtension(filename, mimeType);
+			const claimedMimeType = normalizeMimeType(file?.type || file?.mimeType || '');
+			const extension = extractFileExtension(filename, claimedMimeType);
+			const mimeType = getMimeTypeForExtension(extension) || claimedMimeType || 'application/octet-stream';
 			const classification = classifyForTelnyx(filename, mimeType);
 			const fileStartedAt = Date.now();
 
@@ -586,35 +598,40 @@ export default class extends WorkerEntrypoint {
 					duration_ms: Date.now() - fileStartedAt,
 					result: 'success'
 				});
-			} catch (error) {
-				const reason = error instanceof ConversionClientError
-					? error.code
-					: (typeof error?.code === 'string' ? error.code : 'conversion_failed');
-				failedFiles.push({
-					index: i,
-					filename,
-					mimeType,
-					reason
-				});
-				summaryEntries.push({
-					index: i,
-					filename,
+				} catch (error) {
+					const reason = error instanceof ConversionClientError
+						? error.code
+						: (typeof error?.code === 'string' ? error.code : 'conversion_failed');
+					const errorMessage = typeof error?.message === 'string' && error.message.trim().length > 0
+						? error.message.trim()
+						: null;
+					failedFiles.push({
+						index: i,
+						filename,
+						mimeType,
+						reason,
+						message: errorMessage
+					});
+					summaryEntries.push({
+						index: i,
+						filename,
 					input_type: extension || 'unknown',
 					conversion_path: 'container',
 					duration_ms: Date.now() - fileStartedAt,
 					result: 'failed'
 				});
-				this.logger.log('WARN', 'Telnyx file normalization result', {
-					index: i,
-					filename,
-					input_type: extension || 'unknown',
-					conversion_path: 'container',
-					duration_ms: Date.now() - fileStartedAt,
-					result: 'failed',
-					reason
-				});
+					this.logger.log('WARN', 'Telnyx file normalization result', {
+						index: i,
+						filename,
+						input_type: extension || 'unknown',
+						conversion_path: 'container',
+						duration_ms: Date.now() - fileStartedAt,
+						result: 'failed',
+						reason,
+						message: errorMessage
+					});
+				}
 			}
-		}
 
 		const summary = {
 			total_files: files.length,
@@ -679,8 +696,13 @@ export default class extends WorkerEntrypoint {
 
 			const isTelnyxProvider = faxProvider.getProviderName() === 'telnyx';
 			const isConversionEnabled = this.parseBooleanFlag(callerEnvObj.TELNYX_ENABLE_FILE_CONVERSION, true);
+			const requiresBackendConversion = isTelnyxProvider && this.requiresBackendConversionForTelnyx(faxRequest.files);
 
-			if (isTelnyxProvider && isConversionEnabled) {
+			if (isTelnyxProvider && !isConversionEnabled && requiresBackendConversion) {
+				this.logger.log('INFO', 'Telnyx backend conversion required for office/open-document files; overriding disabled conversion flag');
+			}
+
+			if (isTelnyxProvider && (isConversionEnabled || requiresBackendConversion)) {
 				this.logger.log('INFO', 'Starting Telnyx file normalization pipeline');
 				const normalizationResult = await this.normalizeFilesForTelnyx(faxRequest, callerEnvObj);
 				if (!normalizationResult.success) {
