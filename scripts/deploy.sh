@@ -7,6 +7,22 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Function to run API config contract tests
+run_config_contract_tests() {
+  echo -e "${BLUE}Running API config contract tests...${NC}"
+
+  (cd "$(dirname "$0")/.." && npm run test:config)
+  local test_exit_code=$?
+
+  if [ $test_exit_code -eq 0 ]; then
+    echo -e "${GREEN}✓ API config contract tests passed${NC}"
+    return 0
+  else
+    echo -e "${RED}✗ API config contract tests failed${NC}"
+    return 1
+  fi
+}
+
 # Function to run tests for a service
 run_service_tests() {
   local service_path=$1
@@ -55,6 +71,11 @@ run_all_tests() {
   echo -e "${BLUE}Running tests for all services...${NC}"
   echo -e "${BLUE}===========================================${NC}"
   
+  # Run API config contract tests first
+  if ! run_config_contract_tests; then
+    return 1
+  fi
+
   # Test all services
   for service in ./services/*; do
     if [ -d "$service" ]; then

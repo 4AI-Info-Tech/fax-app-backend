@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "test": "node --test ./test/*.test.cjs",
+    "test:config": "node --test ./test/api-config.contract.test.cjs"
+  },
   "devDependencies": {
     "wrangler": "^4.23.0"
   },
