@@ -76,7 +76,12 @@ export class NotifyreProvider {
 			if (file.data) {
 				try {
 					const buffer = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
-					const blob = new Blob([buffer], { type: file.mimeType || 'application/pdf' });
+					const mimeType = file.mimeType || file.type || 'application/pdf';
+					const filename = file.filename || file.name || `document_${i + 1}.pdf`;
+					const blob = new Blob([buffer], { type: mimeType });
+					blob.filename = filename;
+					blob.name = filename;
+					blob.mimeType = mimeType;
 					processedFiles.push(blob);
 					
 					// Extract page count from file if provided (handle both camelCase and snake_case)
@@ -166,7 +171,7 @@ export class NotifyreProvider {
 				let filename = `document_${i + 1}.pdf`;
 
 				try {
-					if (file instanceof Blob || file instanceof File) {
+					if (file instanceof Blob || (typeof File !== 'undefined' && file instanceof File)) {
 						// Check file size limit (100MB)
 						if (file.size > 100 * 1024 * 1024) {
 							this.logger.log('WARN', 'File size exceeds limit', { size: file.size, filename: file.name });

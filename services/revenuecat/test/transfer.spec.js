@@ -31,6 +31,9 @@ const mockLogger = {
 	log: vi.fn()
 };
 
+const USER_1 = 'f2034c74-782e-4d8f-aad3-e1febc3b5794';
+const USER_2 = '89a5db3a-8b19-4cb5-a17a-6f4af334693d';
+
 describe('DatabaseUtils.transferUserData', () => {
 	let mockSupabase;
 
@@ -52,8 +55,8 @@ describe('DatabaseUtils.transferUserData', () => {
 	});
 
 	it('should handle basic transfer scenarios', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		// Mock user validation
 		mockSupabase.auth.admin.getUserById
@@ -73,8 +76,8 @@ describe('DatabaseUtils.transferUserData', () => {
 	});
 
 	it('should delete anonymous user after transfer', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		// Mock user validation (first two calls for validation, third for deletion check)
 		mockSupabase.auth.admin.getUserById
@@ -93,14 +96,14 @@ describe('DatabaseUtils.transferUserData', () => {
 	});
 
 	it('should handle missing user IDs', async () => {
-		const result = await DatabaseUtils.transferUserData(null, 'user-2', mockEnv, mockLogger);
+		const result = await DatabaseUtils.transferUserData(null, USER_2, mockEnv, mockLogger);
 
 		expect(result.success).toBe(false);
 		expect(result.error).toBe('Missing user IDs');
 	});
 
 	it('should handle same user transfer', async () => {
-		const userId = 'user-1';
+		const userId = USER_1;
 		const result = await DatabaseUtils.transferUserData(userId, userId, mockEnv, mockLogger);
 
 		expect(result.success).toBe(true);
@@ -108,8 +111,8 @@ describe('DatabaseUtils.transferUserData', () => {
 	});
 
 	it('should handle validation failures', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		// Mock user validation failure
 		mockSupabase.auth.admin.getUserById.mockResolvedValue({ data: null, error: { message: 'User not found' } });
@@ -121,8 +124,8 @@ describe('DatabaseUtils.transferUserData', () => {
 	});
 
 	it('should handle transfer failures', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		// Mock user validation
 		mockSupabase.auth.admin.getUserById
@@ -138,14 +141,32 @@ describe('DatabaseUtils.transferUserData', () => {
 	});
 
 	it('should handle missing Supabase configuration', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 		const envWithoutSupabase = {};
 
 		const result = await DatabaseUtils.transferUserData(fromUserId, toUserId, envWithoutSupabase, mockLogger);
 
 		expect(result.success).toBe(false);
 		expect(result.error).toBe('Supabase not configured');
+	});
+
+	it('should normalize uppercase UUIDs before auth validation', async () => {
+		const fromUserId = USER_1.toUpperCase();
+		const toUserId = USER_2.toUpperCase();
+
+		mockSupabase.auth.admin.getUserById
+			.mockResolvedValueOnce({ data: { user: { id: USER_1, app_metadata: { is_anonymous: false } } }, error: null })
+			.mockResolvedValueOnce({ data: { user: { id: USER_2, app_metadata: { is_anonymous: false } } }, error: null })
+			.mockResolvedValueOnce({ data: { user: { id: USER_1, app_metadata: { is_anonymous: false } } }, error: null });
+
+		const result = await DatabaseUtils.transferUserData(fromUserId, toUserId, mockEnv, mockLogger);
+
+		expect(result.success).toBe(true);
+		expect(result.fromUserId).toBe(USER_1);
+		expect(result.toUserId).toBe(USER_2);
+		expect(mockSupabase.auth.admin.getUserById).toHaveBeenNthCalledWith(1, USER_1);
+		expect(mockSupabase.auth.admin.getUserById).toHaveBeenNthCalledWith(2, USER_2);
 	});
 });
 
@@ -159,8 +180,8 @@ describe('DatabaseUtils.validateUsersForTransfer', () => {
 	});
 
 	it('should validate users successfully', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		mockSupabase.auth.admin.getUserById
 			.mockResolvedValueOnce({ data: { user: { id: fromUserId } }, error: null })
@@ -172,8 +193,8 @@ describe('DatabaseUtils.validateUsersForTransfer', () => {
 	});
 
 	it('should reject transfer to anonymous user', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		mockSupabase.auth.admin.getUserById
 			.mockResolvedValueOnce({ data: { user: { id: fromUserId } }, error: null })
@@ -186,8 +207,8 @@ describe('DatabaseUtils.validateUsersForTransfer', () => {
 	});
 
 	it('should handle missing source user', async () => {
-		const fromUserId = 'user-1';
-		const toUserId = 'user-2';
+		const fromUserId = USER_1;
+		const toUserId = USER_2;
 
 		mockSupabase.auth.admin.getUserById.mockResolvedValue({ data: null, error: { message: 'User not found' } });
 
@@ -195,6 +216,14 @@ describe('DatabaseUtils.validateUsersForTransfer', () => {
 
 		expect(result.valid).toBe(false);
 		expect(result.error).toContain('does not exist');
+	});
+
+	it('should reject invalid UUID format before auth call', async () => {
+		const result = await DatabaseUtils.validateUsersForTransfer('not-a-uuid', USER_2, mockEnv, mockLogger);
+
+		expect(result.valid).toBe(false);
+		expect(result.error).toContain('valid UUIDs');
+		expect(mockSupabase.auth.admin.getUserById).not.toHaveBeenCalled();
 	});
 });
 

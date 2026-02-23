@@ -26,6 +26,7 @@ This service handles RevenueCat webhook events and subscription management for t
 - **POST** `/v1/revenuecat/webhook`
 - Handles RevenueCat webhook events
 - Requires webhook secret verification (optional)
+- Exposed through API Gateway only (`https://api-staging.sendfax.pro` / `https://api.sendfax.pro`)
 
 ### Health Check Endpoints
 - **GET** `/v1/revenuecat/health` - Public health check
@@ -91,4 +92,6 @@ The service provides comprehensive logging for:
 This service integrates with:
 - **Supabase**: For data storage and user management
 - **RevenueCat**: For subscription webhook events
-- **Serverless API Gateway**: For request routing and authentication 
+- **Serverless API Gateway**: For request routing and authentication
+
+Direct public invocation of this worker is not supported; configure RevenueCat to call the API endpoint.

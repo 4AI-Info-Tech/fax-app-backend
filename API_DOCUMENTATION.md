@@ -21,6 +21,7 @@ The API supports sending faxes, checking status, retrieving sent and received fa
 | `/v1/fax/numbers` | GET | Yes | List fax numbers |
 | `/v1/fax/coverpages` | GET | Yes | List cover pages |
 | `/v1/fax/webhook/notifyre` | POST | No | Notifyre webhook handler |
+| `/v1/revenuecat/webhook` | POST | No | RevenueCat webhook handler |
 | `/v1/fax/health` | GET | No | Health check |
 | `/v1/fax/health/protected` | GET | Yes | Protected health check |
 | `/v1/fax/webhook/user-created` | POST | No | User creation webhook |
@@ -117,6 +118,11 @@ files[]: <file_upload>
 - **PowerPoint**: .ppt, .pptx
 - **Images**: .jpg, .jpeg, .png, .gif, .bmp, .tiff
 - **Other**: .html, .ps
+
+#### Conversion Rules (Self-hosted ConvertX + App Conversion)
+- App-side conversion to PDF: `.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.gif`, `.bmp`, `.txt`, `.rtf`, `.html`, `.htm`
+- Backend API conversion to PDF: `.doc`, `.docx`, `.xls`, `.xlsx`, `.ppt`, `.pptx`, `.odt`, `.ods`
+- Pass-through: `.pdf`
 
 **Maximum file size**: 100MB  
 **Recommended**: A4 standard sizing for best results
@@ -501,6 +507,14 @@ The API respects Notifyre's rate limiting policies. If rate limits are exceeded,
 
 ### Notifyre Webhooks
 Notifyre webhooks can be verified using HMAC-SHA256 signatures. Set the `NOTIFYRE_WEBHOOK_SECRET` environment variable to enable verification.
+
+### RevenueCat Webhooks
+RevenueCat webhooks must target the API endpoint: `POST /v1/revenuecat/webhook`.
+Use:
+- Staging: `https://api-staging.sendfax.pro/v1/revenuecat/webhook`
+- Production: `https://api.sendfax.pro/v1/revenuecat/webhook`
+
+When `REVENUECAT_WEBHOOK_SECRET` is configured, send the same value in the `Authorization` header.
 
 ### Supabase Webhooks
 Supabase webhooks are verified using the `X-Supabase-Event-Secret` header and the `SUPABASE_WEBHOOK_SECRET` environment variable.

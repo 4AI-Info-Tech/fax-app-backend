@@ -14,8 +14,14 @@ export default class extends WorkerEntrypoint {
 		this.initializeLogger(this.env);
 	}
 
-	async fetch(request, env) {
-		return new Response("Hello from RevenueCat Service");
+	async fetch() {
+		return new Response(JSON.stringify({
+			error: "Not found",
+			message: "RevenueCat webhook is handled via API Gateway at /v1/revenuecat/webhook"
+		}), {
+			status: 404,
+			headers: { 'Content-Type': 'application/json' }
+		});
 	}
 
 	initializeLogger(env) {

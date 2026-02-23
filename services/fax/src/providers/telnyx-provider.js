@@ -4,8 +4,47 @@
  * Special workflow: Save to Supabase → Upload to R2 → Send to Telnyx using R2 public URL
  */
 
-import { FileUtils } from '../utils.js';
 import { DatabaseUtils } from '../database.js';
+import { extractFileExtension } from '../file-type-policy.js';
+
+const EXTENSION_MIME_MAP = {
+	pdf: 'application/pdf',
+	doc: 'application/msword',
+	docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	xls: 'application/vnd.ms-excel',
+	xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+	ppt: 'application/vnd.ms-powerpoint',
+	pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+	odt: 'application/vnd.oasis.opendocument.text',
+	ods: 'application/vnd.oasis.opendocument.spreadsheet',
+	tif: 'image/tiff',
+	tiff: 'image/tiff',
+	jpg: 'image/jpeg',
+	jpeg: 'image/jpeg',
+	png: 'image/png',
+	gif: 'image/gif',
+	bmp: 'image/bmp',
+	txt: 'text/plain',
+	rtf: 'application/rtf',
+	htm: 'text/html',
+	html: 'text/html'
+};
+
+function hasPdfSignature(bytes) {
+	if (!bytes || bytes.length < 5) return false;
+	return (
+		bytes[0] === 0x25 && // %
+		bytes[1] === 0x50 && // P
+		bytes[2] === 0x44 && // D
+		bytes[3] === 0x46 && // F
+		bytes[4] === 0x2d // -
+	);
+}
+
+function sanitizeExtension(ext) {
+	if (!ext) return '';
+	return String(ext).trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
 export class TelnyxProvider {
 	constructor(apiKey, logger, options = {}) {
@@ -86,7 +125,13 @@ export class TelnyxProvider {
 			if (file.data) {
 				try {
 					const buffer = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
-					const blob = new Blob([buffer], { type: file.mimeType || 'application/pdf' });
+					const filename = file.filename || file.name || `document_${i + 1}`;
+					const extension = extractFileExtension(filename, file.mimeType || file.type || '');
+					const mimeType = (file.mimeType || file.type || EXTENSION_MIME_MAP[extension] || 'application/octet-stream').toLowerCase();
+					const blob = new Blob([buffer], { type: mimeType });
+					blob.filename = filename;
+					blob.name = filename;
+					blob.mimeType = mimeType;
 					processedFiles.push(blob);
 					
 					// Extract page count from file if provided (handle both camelCase and snake_case)
@@ -214,6 +259,16 @@ export class TelnyxProvider {
 				credits_required: Math.ceil(creditsRequired) || 0
 			}
 			: null;
+		const conversionSummary = faxRequest.conversionSummary && typeof faxRequest.conversionSummary === 'object'
+			? faxRequest.conversionSummary
+			: null;
+		const metadata = {};
+		if (billingMetadata) {
+			metadata.billing = billingMetadata;
+		}
+		if (conversionSummary) {
+			metadata.file_conversion = conversionSummary;
+		}
 		
 		const faxData = {
 			user_id: userId,
@@ -227,7 +282,7 @@ export class TelnyxProvider {
 			document_count: documentCount,
 			cost: Math.ceil(creditsRequired) || 0,
 			created_at: new Date().toISOString(),
-			metadata: billingMetadata ? { billing: billingMetadata } : {}
+			metadata
 		};
 
 		return await DatabaseUtils.saveFaxRecord(faxData, userId, this.env, this.logger);
@@ -258,27 +313,47 @@ export class TelnyxProvider {
 			});
 
 			try {
-				// Generate unique filename
-				const timestamp = Date.now();
-				const filename = `fax/${faxId}/document_${i + 1}_${timestamp}.pdf`;
-
 				// Convert file to buffer if needed
 				let fileBuffer;
-				if (file instanceof Blob || file instanceof File || (file && typeof file.arrayBuffer === 'function')) {
-					fileBuffer = await file.arrayBuffer();
+				if (file instanceof Blob || (typeof File !== 'undefined' && file instanceof File) || (file && typeof file.arrayBuffer === 'function')) {
+					fileBuffer = new Uint8Array(await file.arrayBuffer());
 				} else if (file.data) {
 					// Base64 encoded data
 					fileBuffer = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
+				} else if (file instanceof Uint8Array) {
+					fileBuffer = file;
+				} else if (file instanceof ArrayBuffer) {
+					fileBuffer = new Uint8Array(file);
 				} else {
 					throw new Error(`Unsupported file format for file ${i + 1}`);
 				}
 
+				const sourceFilename = file?.filename || file?.name || `document_${i + 1}`;
+				const claimedMimeType = String(file?.type || file?.mimeType || '').toLowerCase();
+				let extension = sanitizeExtension(extractFileExtension(sourceFilename, claimedMimeType));
+				let contentType = claimedMimeType || EXTENSION_MIME_MAP[extension] || 'application/octet-stream';
+
+				const claimsPdf = contentType === 'application/pdf' || extension === 'pdf';
+				if (claimsPdf && !hasPdfSignature(fileBuffer)) {
+					throw new Error(`Invalid PDF content for file ${i + 1}: bytes do not match PDF signature`);
+				}
+				if (claimsPdf) {
+					extension = 'pdf';
+					contentType = 'application/pdf';
+				}
+
+				// Generate unique filename with extension that matches actual payload type.
+				const timestamp = Date.now();
+				const suffix = extension ? `.${extension}` : '';
+				const filename = `fax/${faxId}/document_${i + 1}_${timestamp}${suffix}`;
+
 				// Upload to R2
-				const publicUrl = await this.r2Utils.uploadFile(filename, fileBuffer, 'application/pdf');
+				const publicUrl = await this.r2Utils.uploadFile(filename, fileBuffer, contentType);
 				mediaUrls.push(publicUrl);
 
 				this.logger.log('DEBUG', `File ${i + 1} uploaded successfully`, {
 					filename,
+					contentType,
 					url: publicUrl
 				});
 

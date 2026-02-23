@@ -1,0 +1,31 @@
+name = "converter-service"
+main = "src/index.js"
+compatibility_date = "2025-07-04"
+compatibility_flags = ["nodejs_compat"]
+send_metrics = true
+minify = false
+workers_dev = false
+
+[observability]
+enabled = true
+
+[vars]
+LOG_LEVEL = "INFO"
+CONVERTER_MAX_INPUT_BYTES = "104857600"
+CONVERTX_API_ROUTE_PREFIX = "/api"
+CONVERTX_TARGET_FORMAT = "pdf"
+CONVERTX_RETRIES = "2"
+
+[durable_objects]
+bindings = [
+  { name = "CONVERTX_CONTAINER", class_name = "ConvertXContainer" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ConvertXContainer"]
+
+[[containers]]
+class_name = "ConvertXContainer"
+image = "./Dockerfile"
+max_instances = 2
