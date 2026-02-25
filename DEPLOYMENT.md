@@ -322,7 +322,24 @@ wrangler whoami
 | `Main worker deployment failed` | Configuration or auth issue | Check `wrangler.api.toml` and authentication |
 | `Service binding not found` | Service not deployed | Deploy the service first |
 
-## ✅ Best Practices
+### 5. **Converter Service (Shared, Container-Based)**
+
+The `converter` service is a **shared Cloudflare Container** (no `-staging` / `-prod` suffix). It is intentionally skipped during env-specific deployments (`--env staging`, `--env prod`) because:
+
+- It uses a `Dockerfile` that Wrangler must build with Docker.
+- It is not environment-specific — both staging and prod bind to the same `converter-service`.
+
+**To update the converter**, run it separately **without `--env`** (requires Docker running):
+
+```bash
+cd services/converter && npx wrangler deploy
+```
+
+Or deploy only services in the default environment:
+
+```bash
+./scripts/deploy.sh api all --skip-tests  # deploys converter + other default-env services
+```
 
 ### 1. **Always Run Tests**
 ```bash

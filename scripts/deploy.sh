@@ -160,10 +160,15 @@ deploy_service() {
   
   echo -e "${BLUE}Deploying service: $service_name${NC}"
 
-  # Converter runs as a single shared service for all environments.
+  # Converter is a single shared Cloudflare Container service (converter-service).
+  # It requires Docker to build its image and is NOT environment-specific.
+  # Skip it during env-specific deployments (staging/prod) — deploy it separately
+  # without --env when the container image needs updating.
   if [ "$service_name" = "converter" ]; then
     if [ -n "$env" ]; then
-      echo -e "${YELLOW}Converter is shared across staging/prod - deploying once without --env${NC}"
+      echo -e "${YELLOW}Skipping converter: it is a shared service (converter-service) used by all environments.${NC}"
+      echo -e "${YELLOW}Deploy it separately without --env when a new container image is needed.${NC}"
+      return 0
     fi
     (cd "$service_path" && npx wrangler deploy)
   else
@@ -245,7 +250,7 @@ echo -e "${BLUE}Deploy All Services: ${DEPLOY_ALL:-false}${NC}"
 echo -e "${BLUE}Deploy Main Worker: ${DEPLOY_WORKER}${NC}"
 echo -e "${BLUE}Skip Tests: $SKIP_TESTS${NC}"
 echo -e "${BLUE}Converter vars (for Telnyx conversion): CONVERTER_TIMEOUT_MS, TELNYX_MAX_CONVERSION_FILES${NC}"
-echo -e "${BLUE}Converter deployment mode: shared single service (converter-service)${NC}"
+echo -e "${BLUE}Converter deployment mode: shared single service (converter-service); skipped during env-specific deploys${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
 # Run tests first (unless skipped)
