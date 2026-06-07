@@ -43,10 +43,28 @@ run_service_tests() {
   fi
 
   # Check if there are any test files present; if none, skip tests
-  local test_files_count=$(find "$service_path" -type f \( -name "*.spec.js" -o -name "*.test.js" -o -name "*.spec.ts" -o -name "*.test.ts" \) | wc -l | tr -d '[:space:]')
+  local test_files_count=$(find "$service_path" -path "$service_path/node_modules" -prune -o -type f \( -name "*.spec.js" -o -name "*.test.js" -o -name "*.spec.ts" -o -name "*.test.ts" \) -print | wc -l | tr -d '[:space:]')
   if [ "$test_files_count" -eq 0 ]; then
     echo -e "${YELLOW}No test files found in $service_name, skipping tests${NC}"
     return 0
+  fi
+
+  # Service dependencies are installed independently. A missing local test
+  # runner is a setup issue, not a failed test suite.
+  if [ ! -x "$service_path/node_modules/.bin/vitest" ]; then
+    echo -e "${YELLOW}Dependencies are not installed for $service_name. Installing them now...${NC}"
+
+    if [ -f "$service_path/package-lock.json" ]; then
+      (cd "$service_path" && npm ci --no-audit --no-fund)
+    else
+      (cd "$service_path" && npm install --no-audit --no-fund)
+    fi
+
+    local install_exit_code=$?
+    if [ $install_exit_code -ne 0 ]; then
+      echo -e "${RED}✗ Failed to install dependencies for $service_name${NC}"
+      return 1
+    fi
   fi
   
   # Run tests
@@ -137,11 +155,17 @@ deploy_worker() {
   echo -e "${BLUE}Using API config file: $actual_api_config${NC}"
   
   if [ -z "$env" ]; then
-    npx wrangler kv key put api-config.json --path $actual_api_config --binding CONFIG --config $config_path --preview false --remote
-    npx wrangler deploy --config $config_path
+    if ! npx wrangler kv key put api-config.json --path "$actual_api_config" --binding CONFIG --config "$config_path" --preview false --remote; then
+      echo -e "${RED}✗ Failed to upload API config to KV${NC}"
+      return 1
+    fi
+    npx wrangler deploy --config "$config_path"
   else
-    npx wrangler kv key put api-config.json --path $actual_api_config --binding CONFIG --config $config_path --preview false --env $env --remote
-    npx wrangler deploy --config $config_path --env $env
+    if ! npx wrangler kv key put api-config.json --path "$actual_api_config" --binding CONFIG --config "$config_path" --preview false --env "$env" --remote; then
+      echo -e "${RED}✗ Failed to upload API config to KV${NC}"
+      return 1
+    fi
+    npx wrangler deploy --config "$config_path" --env "$env"
   fi
   
   if [ $? -eq 0 ]; then
@@ -187,31 +211,42 @@ deploy_service() {
   fi
 }
 
-# Check if at least one argument is provided
-if [ $# -lt 1 ]; then
-  echo "Usage: $0 <project> <all> [--env <environment>] [--skip-tests] [--services-only]"
-  echo "  <project>: The project name (used for config files)"
-  echo "  <all>: Deploy all services in addition to main worker"
-  echo "  --env <environment>: Deploy to specific environment"
-  echo "  --skip-tests: Skip running tests before deployment"
-  echo "  --services-only: Skip deploying the main worker"
-  exit 1
-fi
+show_usage() {
+  echo "Usage: $0 [project] [all] [--env <environment>] [--skip-tests] [--services-only]"
+  echo "  project: Wrangler config suffix; defaults to api (wrangler.api.toml)"
+  echo "  all: Deploy all services in addition to the main worker"
+  echo "  --env <environment>: Deploy to a configured environment such as staging or prod"
+  echo "  --skip-tests: Skip tests before deployment"
+  echo "  --services-only: Deploy all services without deploying the main worker"
+  echo ""
+  echo "Examples:"
+  echo "  $0 --env staging"
+  echo "  $0 api --env staging"
+  echo "  $0 api all --env staging"
+}
 
-# Set project and config paths
-PROJECT=$1
-CONFIG_PATH="wrangler.$PROJECT.toml"
+# Set defaults before parsing so flags may appear first.
+PROJECT="api"
+PROJECT_SET=false
 API_CONFIG="api-config.json"
 ENV=""
 SKIP_TESTS=false
-# Whether to deploy the main worker
 DEPLOY_WORKER=true
+DEPLOY_ALL=false
 
 # Parse arguments
-shift
 while [[ $# -gt 0 ]]; do
   case $1 in
+    -h|--help)
+      show_usage
+      exit 0
+      ;;
     --env)
+      if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+        echo -e "${RED}--env requires an environment name.${NC}"
+        show_usage
+        exit 1
+      fi
       ENV="$2"
       shift 2
       ;;
@@ -221,7 +256,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --services-only)
       DEPLOY_WORKER=false
-      # If user wants only services, ensure DEPLOY_ALL is true unless explicitly set
       DEPLOY_ALL=true
       shift
       ;;
@@ -229,14 +263,42 @@ while [[ $# -gt 0 ]]; do
       DEPLOY_ALL=true
       shift
       ;;
+    --*)
+      echo -e "${RED}Unknown option: $1${NC}"
+      show_usage
+      exit 1
+      ;;
     *)
-      if [ "$1" == "all" ]; then
-        DEPLOY_ALL=true
+      if [ "$PROJECT_SET" = true ]; then
+        echo -e "${RED}Unexpected argument: $1${NC}"
+        show_usage
+        exit 1
       fi
+      PROJECT="$1"
+      PROJECT_SET=true
       shift
       ;;
   esac
 done
+
+CONFIG_PATH="wrangler.$PROJECT.toml"
+ACTUAL_API_CONFIG="$API_CONFIG"
+if [ -n "$ENV" ]; then
+  ACTUAL_API_CONFIG="api-config.${ENV}.json"
+fi
+
+if [ "$DEPLOY_WORKER" = true ]; then
+  if [ ! -f "$CONFIG_PATH" ]; then
+    echo -e "${RED}Wrangler config not found: $CONFIG_PATH${NC}"
+    echo -e "${YELLOW}Run this script from fax-app-backend or provide the correct project name.${NC}"
+    exit 1
+  fi
+
+  if [ ! -f "$ACTUAL_API_CONFIG" ]; then
+    echo -e "${RED}API config not found: $ACTUAL_API_CONFIG${NC}"
+    exit 1
+  fi
+fi
 
 # Print received parameters and defaults
 echo -e "${BLUE}===========================================${NC}"
@@ -246,7 +308,7 @@ echo -e "${BLUE}Project: $PROJECT${NC}"
 echo -e "${BLUE}Config Path: $CONFIG_PATH${NC}"
 echo -e "${BLUE}API Config: $API_CONFIG${NC}"
 echo -e "${BLUE}Environment: ${ENV:-default}${NC}"
-echo -e "${BLUE}Deploy All Services: ${DEPLOY_ALL:-false}${NC}"
+echo -e "${BLUE}Deploy All Services: ${DEPLOY_ALL}${NC}"
 echo -e "${BLUE}Deploy Main Worker: ${DEPLOY_WORKER}${NC}"
 echo -e "${BLUE}Skip Tests: $SKIP_TESTS${NC}"
 echo -e "${BLUE}Converter vars (for Telnyx conversion): CONVERTER_TIMEOUT_MS, TELNYX_MAX_CONVERSION_FILES${NC}"
@@ -262,21 +324,12 @@ else
   echo -e "${YELLOW}Skipping tests as requested...${NC}"
 fi
 
-# Deploy the main worker
 echo -e "${BLUE}===========================================${NC}"
 echo -e "${BLUE}Starting deployment process...${NC}"
 echo -e "${BLUE}===========================================${NC}"
 
-if [ "$DEPLOY_WORKER" = true ]; then
-  if ! deploy_worker $CONFIG_PATH $API_CONFIG $ENV; then
-    echo -e "${RED}Main worker deployment failed, aborting...${NC}"
-    exit 1
-  fi
-else
-  echo -e "${YELLOW}Skipping main worker deployment (--services-only flag set)${NC}"
-fi
-
-# Check if the 'all' flag is provided
+# Deploy services first so new service bindings exist before the gateway is
+# published.
 if [ "$DEPLOY_ALL" = true ]; then
   echo -e "${BLUE}===========================================${NC}"
   echo -e "${BLUE}Deploying all services...${NC}"
@@ -321,6 +374,15 @@ if [ "$DEPLOY_ALL" = true ]; then
     echo -e "${RED}Some deployments failed!${NC}"
     exit 1
   fi
+fi
+
+if [ "$DEPLOY_WORKER" = true ]; then
+  if ! deploy_worker "$CONFIG_PATH" "$API_CONFIG" "$ENV"; then
+    echo -e "${RED}Main worker deployment failed, aborting...${NC}"
+    exit 1
+  fi
+else
+  echo -e "${YELLOW}Skipping main worker deployment (--services-only flag set)${NC}"
 fi
 
 echo -e "${GREEN}===========================================${NC}"

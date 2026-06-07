@@ -367,11 +367,67 @@ describe('Fax Service', () => {
 			});
 		});
 
-	describe('sendFax', () => {
-		it('should queue a fax successfully', async () => {
-			const request = new Request('https://api.sendfax.pro/v1/fax/send', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+		const jsonResponse = (statusCode, payload) => ({
+			ok: statusCode >= 200 && statusCode < 300,
+			status: statusCode,
+			json: () => Promise.resolve(payload),
+			text: () => Promise.resolve(JSON.stringify(payload))
+		});
+
+		function installSendFaxFetchMockWithRevenueCatSnapshots(snapshots) {
+			let entitlementCalls = 0;
+			let currencyCalls = 0;
+
+			global.fetch.mockImplementation((url, options) => {
+				const urlObj = new URL(url);
+				const path = urlObj.pathname;
+
+				if (urlObj.hostname === 'api.revenuecat.com' && path.endsWith('/active_entitlements')) {
+					const snapshot = snapshots[Math.min(entitlementCalls, snapshots.length - 1)];
+					entitlementCalls++;
+					return Promise.resolve(jsonResponse(200, {
+						items: snapshot.isSubscriber ? [{ id: 'pro', entitlement_id: 'pro' }] : []
+					}));
+				}
+
+				if (urlObj.hostname === 'api.revenuecat.com' && path.endsWith('/virtual_currencies')) {
+					const snapshot = snapshots[Math.min(currencyCalls, snapshots.length - 1)];
+					currencyCalls++;
+					return Promise.resolve(jsonResponse(200, {
+						items: [
+							{ currency_code: 'FreeCredit', balance: snapshot.freeCredits ?? 0 },
+							{ currency_code: 'ProCredit', balance: snapshot.proCredits ?? 0 }
+						]
+					}));
+				}
+
+				if (path === '/fax/send') {
+					return Promise.resolve(jsonResponse(200, {
+						payload: {
+							faxID: 'fax_mock_123',
+							friendlyID: 'TEST123'
+						},
+						success: true,
+						statusCode: 200,
+						message: "OK",
+						errors: []
+					}));
+				}
+
+				return Promise.resolve(jsonResponse(404, { error: 'Not found' }));
+			});
+
+			return {
+				getEntitlementCalls: () => entitlementCalls,
+				getCurrencyCalls: () => currencyCalls
+			};
+		}
+
+		describe('sendFax', () => {
+			it('should queue a fax successfully', async () => {
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					recipient: '+1234567890',
 					message: 'Test fax message',
@@ -388,15 +444,129 @@ describe('Fax Service', () => {
 
 			const result = await faxService.sendFax(request, JSON.stringify(mockEnv), JSON.stringify(mockSagContext));
 			expect(result.statusCode).toBe(200);
-			expect(result.message).toBe('Fax submitted successfully');
-			expect(result.data.recipient).toBe('+1234567890');
-			expect(result.data.status).toBe('queued');
-		});
-
-		it('should handle empty request body', async () => {
-			const request = new Request('https://api.sendfax.pro/v1/fax/send', {
-				method: 'POST'
+				expect(result.message).toBe('Fax submitted successfully');
+				expect(result.data.recipient).toBe('+1234567890');
+				expect(result.data.status).toBe('queued');
 			});
+
+			it('should return normal insufficient credits for free users without retrying RevenueCat', async () => {
+				const rcCalls = installSendFaxFetchMockWithRevenueCatSnapshots([
+					{ isSubscriber: false, freeCredits: 0, proCredits: 0 }
+				]);
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						recipient: '+1234567890',
+						message: 'Test fax message',
+						pages: 2
+					})
+				});
+
+				const result = await faxService.sendFax(request, JSON.stringify(mockEnv), JSON.stringify(mockSagContext));
+
+				expect(result.statusCode).toBe(402);
+				expect(result.data.reason).toBe('insufficient_credits');
+				expect(result.data.availableCredits).toBe(0);
+				expect(result.data.activeCredits).toBe(0);
+				expect(result.data.freeCredits).toBe(0);
+				expect(result.data.proCredits).toBe(0);
+				expect(result.data.retryAfterSeconds).toBeNull();
+				expect(rcCalls.getEntitlementCalls()).toBe(1);
+				expect(rcCalls.getCurrencyCalls()).toBe(1);
+			});
+
+			it('should retry subscriber credit snapshot and queue when ProCredit appears', async () => {
+				const rcCalls = installSendFaxFetchMockWithRevenueCatSnapshots([
+					{ isSubscriber: true, freeCredits: 0, proCredits: 0 },
+					{ isSubscriber: true, freeCredits: 0, proCredits: 40 }
+				]);
+				const envWithFastRetry = {
+					...mockEnv,
+					REVENUECAT_CREDIT_SYNC_RETRY_ATTEMPTS: '3',
+					REVENUECAT_CREDIT_SYNC_RETRY_BASE_MS: '0'
+				};
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						recipient: '+1234567890',
+						message: 'Test fax message',
+						pages: 2
+					})
+				});
+
+				const result = await faxService.sendFax(request, envWithFastRetry, mockSagContext);
+
+				expect(result.statusCode).toBe(200);
+				expect(result.message).toBe('Fax submitted successfully');
+				expect(rcCalls.getEntitlementCalls()).toBe(2);
+				expect(rcCalls.getCurrencyCalls()).toBe(2);
+			});
+
+			it('should return subscription syncing when subscriber ProCredit remains missing after retries', async () => {
+				const rcCalls = installSendFaxFetchMockWithRevenueCatSnapshots([
+					{ isSubscriber: true, freeCredits: 0, proCredits: 0 },
+					{ isSubscriber: true, freeCredits: 0, proCredits: 0 }
+				]);
+				const envWithFastRetry = {
+					...mockEnv,
+					REVENUECAT_CREDIT_SYNC_RETRY_ATTEMPTS: '2',
+					REVENUECAT_CREDIT_SYNC_RETRY_BASE_MS: '0'
+				};
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						recipient: '+1234567890',
+						message: 'Test fax message',
+						pages: 2
+					})
+				});
+
+				const result = await faxService.sendFax(request, envWithFastRetry, mockSagContext);
+
+				expect(result.statusCode).toBe(402);
+				expect(result.data.reason).toBe('subscription_credits_syncing');
+				expect(result.data.isSubscriber).toBe(true);
+				expect(result.data.availableCredits).toBe(0);
+				expect(result.data.activeCredits).toBe(0);
+				expect(result.data.proCredits).toBe(0);
+				expect(result.data.retryAfterSeconds).toBe(1);
+				expect(rcCalls.getEntitlementCalls()).toBe(2);
+				expect(rcCalls.getCurrencyCalls()).toBe(2);
+			});
+
+			it('should not retry when subscriber already has enough ProCredit', async () => {
+				const rcCalls = installSendFaxFetchMockWithRevenueCatSnapshots([
+					{ isSubscriber: true, freeCredits: 0, proCredits: 40 }
+				]);
+				const envWithFastRetry = {
+					...mockEnv,
+					REVENUECAT_CREDIT_SYNC_RETRY_ATTEMPTS: '3',
+					REVENUECAT_CREDIT_SYNC_RETRY_BASE_MS: '0'
+				};
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						recipient: '+1234567890',
+						message: 'Test fax message',
+						pages: 2
+					})
+				});
+
+				const result = await faxService.sendFax(request, envWithFastRetry, mockSagContext);
+
+				expect(result.statusCode).toBe(200);
+				expect(rcCalls.getEntitlementCalls()).toBe(1);
+				expect(rcCalls.getCurrencyCalls()).toBe(1);
+			});
+
+			it('should handle empty request body', async () => {
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST'
+				});
 
 			const result = await faxService.sendFax(request, JSON.stringify(mockEnv), JSON.stringify(mockSagContext));
 			expect(result.statusCode).toBe(200);
@@ -660,12 +830,50 @@ describe('Fax Service', () => {
 			expect(result.error).toBe('File conversion failed');
 			expect(result.data.failedFiles[0].reason).toBe('invalid_pdf_content');
 			expect(mockConvertToPdf).not.toHaveBeenCalled();
+			});
 		});
-	});
+
+		describe('numberLookup', () => {
+			it('should keep snake_case fields and include camelCase data compatibility fields', async () => {
+				const lookupSpy = vi.spyOn(faxService, 'performTelnyxLookup').mockResolvedValue({
+					country_code: 'US',
+					portability: {}
+				});
+				const request = new Request('https://api.sendfax.pro/v1/fax/lookup?to=%2B1234567890', {
+					method: 'GET'
+				});
+
+				try {
+					const result = await faxService.numberLookup(request, {
+						...mockEnv,
+						TELNYX_API_KEY: 'test-telnyx-key'
+					}, mockSagContext);
+
+					expect(result.statusCode).toBe(200);
+					expect(result.credit_per_page).toBeGreaterThan(0);
+					expect(result.creditPerPage).toBe(result.credit_per_page);
+					expect(result.phone_e164).toBe('+1234567890');
+					expect(result.phoneE164).toBe('+1234567890');
+					expect(result.dialed_digits).toBe('1234567890');
+					expect(result.dialedDigits).toBe('1234567890');
+					expect(result.billed_rate).toBeTruthy();
+					expect(result.billedRate).toEqual(result.billed_rate);
+					expect(result.data).toEqual(expect.objectContaining({
+						input: '+1234567890',
+						phoneE164: '+1234567890',
+						dialedDigits: '1234567890',
+						creditPerPage: result.credit_per_page,
+						billedRate: result.billed_rate
+					}));
+				} finally {
+					lookupSpy.mockRestore();
+				}
+			});
+		});
 
 
 
-	describe('Provider Selection', () => {
+		describe('Provider Selection', () => {
 		it('should default to Notifyre provider when FAX_PROVIDER not set', async () => {
 			const envWithoutProvider = { ...mockEnv };
 			delete envWithoutProvider.FAX_PROVIDER;

@@ -38,6 +38,10 @@
         {
             "alias": "admob_service",
             "binding": "ADMOB_SERVICE"
+        },
+        {
+            "alias": "form_assistant_service",
+            "binding": "FORM_ASSISTANT_SERVICE"
         }
     ],
     "cors": {
@@ -273,6 +277,46 @@
                 "function": "health"
             },
             "auth": false
+        },
+        {
+            "method": "GET",
+            "path": "/v1/forms/ai/profiles",
+            "integration": {
+                "type": "service_binding",
+                "binding": "form_assistant_service",
+                "function": "profiles"
+            },
+            "auth": false
+        },
+        {
+            "method": "POST",
+            "path": "/v1/forms/ai/sessions",
+            "integration": {
+                "type": "service_binding",
+                "binding": "form_assistant_service",
+                "function": "createSession"
+            },
+            "auth": true
+        },
+        {
+            "method": "POST",
+            "path": "/v1/forms/ai/sessions/{sessionId}/messages",
+            "integration": {
+                "type": "service_binding",
+                "binding": "form_assistant_service",
+                "function": "message"
+            },
+            "auth": true
+        },
+        {
+            "method": "POST",
+            "path": "/v1/forms/ai/sessions/{sessionId}/finalize",
+            "integration": {
+                "type": "service_binding",
+                "binding": "form_assistant_service",
+                "function": "finalize"
+            },
+            "auth": true
         },
         {
             "method": "POST",

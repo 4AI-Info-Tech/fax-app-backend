@@ -39,6 +39,126 @@ export default class extends WorkerEntrypoint {
 		}
 	}
 
+	getCreditSyncRetryConfig(callerEnvObj = {}) {
+		const rawAttempts = Number(callerEnvObj.REVENUECAT_CREDIT_SYNC_RETRY_ATTEMPTS || 3);
+		const rawBaseDelayMs = Number(callerEnvObj.REVENUECAT_CREDIT_SYNC_RETRY_BASE_MS || 500);
+		const attempts = Math.min(Math.max(Number.isFinite(rawAttempts) ? Math.trunc(rawAttempts) : 3, 1), 5);
+		const baseDelayMs = Math.min(Math.max(Number.isFinite(rawBaseDelayMs) ? Math.trunc(rawBaseDelayMs) : 500, 0), 2000);
+
+		return {
+			attempts,
+			baseDelayMs,
+			retryAfterSeconds: Math.max(1, Math.ceil(baseDelayMs / 1000))
+		};
+	}
+
+	sleep(ms) {
+		if (!ms || ms <= 0) return Promise.resolve();
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	shouldRetrySubscriberCreditSync(snapshot, creditsRequired) {
+		const required = Math.ceil(Number(creditsRequired) || 0);
+		const activeCredits = Math.ceil(Number(snapshot?.activeCredits) || 0);
+		const proCredits = Math.ceil(Number(snapshot?.proCredits) || 0);
+
+		return (
+			required > 0 &&
+			snapshot?.isSubscriber === true &&
+			activeCredits < required &&
+			proCredits <= 0
+		);
+	}
+
+	async getCreditSnapshotForSend(rcClient, userId, creditsRequired, callerEnvObj = {}) {
+		const retryConfig = this.getCreditSyncRetryConfig(callerEnvObj);
+		let snapshot = null;
+		let attemptsUsed = 0;
+
+		for (let attempt = 1; attempt <= retryConfig.attempts; attempt++) {
+			attemptsUsed = attempt;
+			snapshot = await rcClient.getCreditSnapshot(userId);
+
+			const activeCredits = Math.ceil(Number(snapshot.activeCredits) || 0);
+			if (activeCredits >= creditsRequired) {
+				return {
+					snapshot,
+					attemptsUsed,
+					syncPending: false,
+					retryConfig
+				};
+			}
+
+			if (!this.shouldRetrySubscriberCreditSync(snapshot, creditsRequired)) {
+				return {
+					snapshot,
+					attemptsUsed,
+					syncPending: false,
+					retryConfig
+				};
+			}
+
+			if (attempt < retryConfig.attempts) {
+				const delayMs = retryConfig.baseDelayMs * attempt;
+				this.logger.log('WARN', 'Subscriber credits not synced yet; retrying RevenueCat snapshot', {
+					userId,
+					attempt,
+					attempts: retryConfig.attempts,
+					delayMs,
+					creditsRequired,
+					activeCredits: snapshot.activeCredits,
+					proCredits: snapshot.proCredits
+				});
+				await this.sleep(delayMs);
+			}
+		}
+
+		return {
+			snapshot,
+			attemptsUsed,
+			syncPending: this.shouldRetrySubscriberCreditSync(snapshot, creditsRequired),
+			retryConfig
+		};
+	}
+
+	buildInsufficientCreditsResponse({
+		snapshot,
+		creditsRequired,
+		creditPerPage,
+		totalPages,
+		syncPending,
+		retryConfig
+	}) {
+		const activeCredits = Math.ceil(Number(snapshot?.activeCredits) || 0);
+		const freeCredits = Math.ceil(Number(snapshot?.freeCredits) || 0);
+		const proCredits = Math.ceil(Number(snapshot?.proCredits) || 0);
+		const creditShortage = Math.max(0, Math.ceil(Number(creditsRequired) || 0) - activeCredits);
+		const reason = syncPending ? 'subscription_credits_syncing' : 'insufficient_credits';
+		const retryAfterSeconds = syncPending ? retryConfig.retryAfterSeconds : null;
+
+		return {
+			statusCode: 402,
+			error: 'Insufficient credits',
+			message: syncPending
+				? 'Your subscription is active, but included credits are still syncing. Please try again shortly.'
+				: `You need ${creditShortage} more credits to send this fax.`,
+			data: {
+				reason,
+				pages: totalPages,
+				creditPerPage,
+				creditsRequired,
+				availableCredits: activeCredits,
+				activeCredits,
+				freeCredits,
+				proCredits,
+				activeCurrencyCode: snapshot?.activeCurrencyCode || null,
+				isSubscriber: snapshot?.isSubscriber === true,
+				retryAfterSeconds
+			},
+			timestamp: new Date().toISOString()
+		};
+	}
+
 	/**
 	 * Deduct credits in RevenueCat when a fax reaches delivered state.
 	 */
@@ -751,42 +871,43 @@ export default class extends WorkerEntrypoint {
 					};
 				}
 
-					const creditSnapshot = await rcClient.getCreditSnapshot(userId);
-					const hasCredits = creditSnapshot.activeCredits >= creditsRequired;
-					const billingContext = {
-						revenueCatCustomerId: creditSnapshot.customerId || userId,
-						activeCurrencyCode: creditSnapshot.activeCurrencyCode || null,
-						isSubscriber: creditSnapshot.isSubscriber === true
-					};
-					
-					if (!hasCredits) {
-						const creditShortage = Math.max(0, creditsRequired - creditSnapshot.activeCredits);
-						this.logger.log('WARN', 'Insufficient credits for fax', {
+				const creditCheck = await this.getCreditSnapshotForSend(
+					rcClient,
+					userId,
+					creditsRequired,
+					callerEnvObj
+				);
+				const creditSnapshot = creditCheck.snapshot;
+				const hasCredits = creditSnapshot.activeCredits >= creditsRequired;
+				const billingContext = {
+					revenueCatCustomerId: creditSnapshot.customerId || userId,
+					activeCurrencyCode: creditSnapshot.activeCurrencyCode || null,
+					isSubscriber: creditSnapshot.isSubscriber === true
+				};
+
+				if (!hasCredits) {
+					this.logger.log('WARN', 'Insufficient credits for fax', {
 						userId: userId,
 						pages: totalPages,
 						creditPerPage: creditPerPage,
 						creditsRequired: creditsRequired,
 						availableCredits: creditSnapshot.activeCredits,
 						activeCurrencyCode: creditSnapshot.activeCurrencyCode,
-						isSubscriber: creditSnapshot.isSubscriber
+						isSubscriber: creditSnapshot.isSubscriber,
+						reason: creditCheck.syncPending ? 'subscription_credits_syncing' : 'insufficient_credits',
+						revenueCatSnapshotAttempts: creditCheck.attemptsUsed
 					});
 
-					return {
-						statusCode: 402,
-						error: 'Insufficient credits',
-						message: `You need ${creditShortage} more credits to send this fax.`,
-						data: {
-							pages: totalPages,
-							creditPerPage: creditPerPage,
-							creditsRequired: creditsRequired,
-							availableCredits: creditSnapshot.activeCredits,
-							activeCurrencyCode: creditSnapshot.activeCurrencyCode,
-							isSubscriber: creditSnapshot.isSubscriber
-						},
-						timestamp: new Date().toISOString()
-					};
+					return this.buildInsufficientCreditsResponse({
+						snapshot: creditSnapshot,
+						creditsRequired,
+						creditPerPage,
+						totalPages,
+						syncPending: creditCheck.syncPending,
+						retryConfig: creditCheck.retryConfig
+					});
 				}
-				
+
 				this.logger.log('INFO', 'Credit check passed', {
 					userId: userId,
 					pages: totalPages,
@@ -794,7 +915,8 @@ export default class extends WorkerEntrypoint {
 					creditsRequired: creditsRequired,
 					availableCredits: creditSnapshot.activeCredits,
 					activeCurrencyCode: creditSnapshot.activeCurrencyCode,
-					isSubscriber: creditSnapshot.isSubscriber
+					isSubscriber: creditSnapshot.isSubscriber,
+					revenueCatSnapshotAttempts: creditCheck.attemptsUsed
 				});
 			
 				let faxResult;
@@ -2303,9 +2425,21 @@ export default class extends WorkerEntrypoint {
 					message: 'No matching rate found for this number',
 					input: to,
 					phone_e164: phoneE164,
+					phoneE164,
 					dialed_digits: dialedDigits,
+					dialedDigits,
 					lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
+					lrnPrefixUsedForRating: rateCalculation.lrnPrefix,
 					credit_per_page: null,
+					creditPerPage: null,
+					data: {
+						input: to,
+						phoneE164,
+						dialedDigits,
+						lrnPrefixUsedForRating: rateCalculation.lrnPrefix,
+						billedRate: null,
+						creditPerPage: null
+					},
 					debug: {
 						lrn_match: rateCalculation.lrnMatch,
 						dialed_match: rateCalculation.dialedMatch,
@@ -2319,10 +2453,28 @@ export default class extends WorkerEntrypoint {
 				message: 'Number lookup successful',
 				input: to,
 				phone_e164: phoneE164,
+				phoneE164,
 				dialed_digits: dialedDigits,
+				dialedDigits,
 				lrn_prefix_used_for_rating: rateCalculation.lrnPrefix,
+				lrnPrefixUsedForRating: rateCalculation.lrnPrefix,
 				billed_rate: rateCalculation.billed,
+				billedRate: rateCalculation.billed,
 				credit_per_page: rateCalculation.creditPerPage,
+				creditPerPage: rateCalculation.creditPerPage,
+				data: {
+					input: to,
+					phoneE164,
+					dialedDigits,
+					lrnPrefixUsedForRating: rateCalculation.lrnPrefix,
+					billedRate: rateCalculation.billed,
+					creditPerPage: rateCalculation.creditPerPage,
+					debug: {
+						lrnMatch: rateCalculation.lrnMatch,
+						dialedMatch: rateCalculation.dialedMatch,
+						portability: lookupData?.portability || null,
+					}
+				},
 				debug: {
 					lrn_match: rateCalculation.lrnMatch,
 					dialed_match: rateCalculation.dialedMatch,
