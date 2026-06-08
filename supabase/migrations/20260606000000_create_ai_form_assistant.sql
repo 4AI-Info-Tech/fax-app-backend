@@ -161,16 +161,12 @@ SELECT
     CASE
         WHEN lower(catalog.title) LIKE '%8842%' THEN 10
         WHEN lower(catalog.title) LIKE '%8940%' THEN 20
-        ELSE 30
+        WHEN lower(catalog.title) ~ 'cms[- ]?29([^0-9]|$)' THEN 30
+        ELSE 1000
     END
 FROM public.form_catalog AS catalog
 WHERE catalog.is_active = true
   AND catalog.is_fillable_expected = true
-  AND (
-      lower(catalog.title) LIKE '%8842%'
-      OR lower(catalog.title) LIKE '%8940%'
-      OR lower(catalog.title) ~ 'cms[- ]?29([^0-9]|$)'
-  )
 ON CONFLICT (form_id) DO UPDATE
 SET display_name = EXCLUDED.display_name,
     description = EXCLUDED.description,

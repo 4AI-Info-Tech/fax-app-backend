@@ -37,6 +37,8 @@ const RESPONSE_SCHEMA = {
 	]
 };
 
+const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
+
 function normalizeConversation(conversation) {
 	if (!Array.isArray(conversation)) return [];
 
@@ -96,17 +98,17 @@ function buildPrompt({ profile, fieldNames, conversation, finalize }) {
 export class OpenAIFormAssistant {
 	constructor(env) {
 		this.apiKey = env.OPENAI_API_KEY || '';
-		this.model = env.OPENAI_MODEL || '';
+		this.model = env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
 		this.baseUrl = (env.OPENAI_API_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
 	}
 
 	isConfigured() {
-		return Boolean(this.apiKey && this.model);
+		return Boolean(this.apiKey);
 	}
 
 	async generate({ profile, fieldNames, conversation = [], finalize = false }) {
 		if (!this.isConfigured()) {
-			throw new Error('OPENAI_API_KEY and OPENAI_MODEL are required');
+			throw new Error('OPENAI_API_KEY is required');
 		}
 
 		const response = await fetch(`${this.baseUrl}/responses`, {
@@ -160,4 +162,4 @@ export class OpenAIFormAssistant {
 	}
 }
 
-export { RESPONSE_SCHEMA, buildPrompt, extractResponseText, normalizeConversation };
+export { DEFAULT_OPENAI_MODEL, RESPONSE_SCHEMA, buildPrompt, extractResponseText, normalizeConversation };

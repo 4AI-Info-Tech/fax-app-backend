@@ -6,6 +6,8 @@ import {
 	normalizeFieldNames
 } from '../src/form-assistant.js';
 import {
+	DEFAULT_OPENAI_MODEL,
+	OpenAIFormAssistant,
 	buildPrompt,
 	extractResponseText,
 	normalizeConversation
@@ -71,5 +73,12 @@ describe('OpenAI request shaping', () => {
 			}]
 		});
 		expect(text).toBe('{"is_complete":false}');
+	});
+
+	it('defaults the OpenAI model when the environment omits it', () => {
+		const assistant = new OpenAIFormAssistant({ OPENAI_API_KEY: 'test-key' });
+
+		expect(assistant.model).toBe(DEFAULT_OPENAI_MODEL);
+		expect(assistant.isConfigured()).toBe(true);
 	});
 });

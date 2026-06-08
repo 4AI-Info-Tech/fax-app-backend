@@ -8,16 +8,34 @@ conversation. PDF files and PDF URLs are never sent to the model.
 Required Worker secrets:
 
 - `OPENAI_API_KEY`
-- `OPENAI_MODEL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `REVENUECAT_SECRET_API_KEY`
 
-Optional variables:
+Non-secret Worker variables are configured in `wrangler.toml` for default,
+staging, and production:
 
+- `ENVIRONMENT`
+- `SUPABASE_URL`
+- `REVENUECAT_PROJECT_ID`
+- `AI_FORM_FREE_COMPLETIONS`
+- `OPENAI_MODEL`
 - `OPENAI_API_BASE_URL`
-- `AI_FORM_FREE_COMPLETIONS` (default: `1`)
+- `REVENUECAT_API_BASE_URL`
+- `REVENUECAT_TIMEOUT_MS`
+- `REVENUECAT_FREE_CURRENCY_CODES`
+- `REVENUECAT_PRO_CURRENCY_CODES`
 
 Set secrets independently for staging and production before deployment.
+
+```bash
+wrangler secret put OPENAI_API_KEY --env staging
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY --env staging
+wrangler secret put REVENUECAT_SECRET_API_KEY --env staging
+
+wrangler secret put OPENAI_API_KEY --env prod
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY --env prod
+wrangler secret put REVENUECAT_SECRET_API_KEY --env prod
+```
 
 Deploy from this service directory:
 

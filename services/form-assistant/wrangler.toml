@@ -10,7 +10,16 @@ workers_dev = false
 enabled = true
 
 [vars]
+ENVIRONMENT = "development"
+SUPABASE_URL = "https://vqdpahsrwtaccjozuchj.supabase.co"
+REVENUECAT_PROJECT_ID = "proj7a20ca10"
 AI_FORM_FREE_COMPLETIONS = "1"
+OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+REVENUECAT_API_BASE_URL = "https://api.revenuecat.com/v2"
+REVENUECAT_TIMEOUT_MS = "10000"
+REVENUECAT_FREE_CURRENCY_CODES = "FreeCredit,free_credits"
+REVENUECAT_PRO_CURRENCY_CODES = "ProCredit,pro_credits"
 
 [env.staging]
 name = "form-assistant-service-staging"
@@ -23,6 +32,12 @@ ENVIRONMENT = "staging"
 SUPABASE_URL = "https://vqdpahsrwtaccjozuchj.supabase.co"
 REVENUECAT_PROJECT_ID = "proj7a20ca10"
 AI_FORM_FREE_COMPLETIONS = "1"
+OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+REVENUECAT_API_BASE_URL = "https://api.revenuecat.com/v2"
+REVENUECAT_TIMEOUT_MS = "10000"
+REVENUECAT_FREE_CURRENCY_CODES = "FreeCredit,free_credits"
+REVENUECAT_PRO_CURRENCY_CODES = "ProCredit,pro_credits"
 
 [env.prod]
 name = "form-assistant-service-prod"
@@ -37,3 +52,9 @@ ENVIRONMENT = "prod"
 SUPABASE_URL = "https://qgzzpufyjczgvvggvrhh.supabase.co"
 REVENUECAT_PROJECT_ID = "proj7a20ca10"
 AI_FORM_FREE_COMPLETIONS = "1"
+OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+REVENUECAT_API_BASE_URL = "https://api.revenuecat.com/v2"
+REVENUECAT_TIMEOUT_MS = "10000"
+REVENUECAT_FREE_CURRENCY_CODES = "FreeCredit,free_credits"
+REVENUECAT_PRO_CURRENCY_CODES = "ProCredit,pro_credits"
