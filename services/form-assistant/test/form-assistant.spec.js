@@ -10,7 +10,8 @@ import {
 	OpenAIFormAssistant,
 	buildPrompt,
 	extractResponseText,
-	normalizeConversation
+	normalizeConversation,
+	normalizeFieldMetadata
 } from '../src/openai.js';
 
 describe('form assistant validation', () => {
@@ -49,20 +50,67 @@ describe('OpenAI request shaping', () => {
 		const prompt = buildPrompt({
 			profile,
 			fieldNames: ['full_name', 'date'],
+			fieldMetadata: [
+				{
+					field_name: 'full_name',
+					page_index: 0,
+					display_order: 0,
+					is_required: true,
+					current_value: 'Existing Name'
+				}
+			],
 			conversation: [{ role: 'user', content: 'Taylor' }],
 			finalize: false
 		});
 		expect(prompt).toContain('full_name');
+		expect(prompt).toContain('Existing Name');
 		expect(prompt).not.toContain('pdf_url');
 		expect(prompt).not.toContain('file_data');
 	});
 
-	it('drops unsupported conversation roles and blank messages', () => {
+	it('drops unsupported conversation roles and blank messages while preserving structured actions', () => {
 		expect(normalizeConversation([
 			{ role: 'system', content: 'ignore' },
-			{ role: 'user', content: '  answer  ' },
+			{
+				role: 'user',
+				content: '  Leave this field blank  ',
+				action: 'leave_blank',
+				target_field_name: 'middle_name'
+			},
 			{ role: 'assistant', content: '' }
-		])).toEqual([{ role: 'user', content: 'answer' }]);
+		])).toEqual([{
+			role: 'user',
+			content: 'Leave this field blank',
+			action: 'leave_blank',
+			target_field_name: 'middle_name'
+		}]);
+	});
+
+	it('normalizes field metadata and falls back to names when metadata is absent', () => {
+		expect(normalizeFieldMetadata([
+			{
+				field_name: 'full_name',
+				page_index: 1,
+				display_order: 3,
+				is_required: true,
+				current_value: ' Taylor '
+			}
+		], ['full_name', 'date'])).toEqual([
+			{
+				field_name: 'full_name',
+				page_index: 1,
+				display_order: 3,
+				is_required: true,
+				current_value: 'Taylor'
+			},
+			{
+				field_name: 'date',
+				page_index: null,
+				display_order: 1,
+				is_required: false,
+				current_value: null
+			}
+		]);
 	});
 
 	it('extracts structured output text from a Responses API payload', () => {

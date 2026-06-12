@@ -32,7 +32,7 @@ export class FormAssistantDatabase {
 		return data;
 	}
 
-	async createSession({ userId, profile, fieldNames }) {
+	async createSession({ userId, profile, fieldNames, fieldMetadata }) {
 		const { data, error } = await this.client
 			.from('ai_form_sessions')
 			.insert({
@@ -40,6 +40,7 @@ export class FormAssistantDatabase {
 				profile_id: profile.id,
 				form_id: profile.form_id,
 				field_names: fieldNames,
+				field_metadata: fieldMetadata || [],
 				status: 'started'
 			})
 			.select('id, form_id, status, created_at')
@@ -56,6 +57,7 @@ export class FormAssistantDatabase {
 				id,
 				form_id,
 				field_names,
+				field_metadata,
 				status,
 				ai_calls,
 				ai_form_profiles (

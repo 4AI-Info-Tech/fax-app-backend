@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { RevenueCatClient } from '../../shared/revenuecat-client.js';
 import { FormAssistantDatabase } from './database.js';
-import { OpenAIFormAssistant, normalizeConversation } from './openai.js';
+import { OpenAIFormAssistant, normalizeConversation, normalizeFieldMetadata } from './openai.js';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -84,6 +84,7 @@ export default class extends WorkerEntrypoint {
 			const body = await request.json();
 			const formId = body?.form_id;
 			const fieldNames = normalizeFieldNames(body?.field_names);
+			const fieldMetadata = normalizeFieldMetadata(body?.field_metadata, fieldNames);
 			if (!UUID_REGEX.test(formId || '') || fieldNames.length === 0) {
 				return json({ error: 'form_id and at least one field_name are required' }, 400);
 			}
@@ -104,9 +105,9 @@ export default class extends WorkerEntrypoint {
 				}
 			}
 
-			const session = await database.createSession({ userId, profile, fieldNames });
+			const session = await database.createSession({ userId, profile, fieldNames, fieldMetadata });
 			const assistant = new OpenAIFormAssistant(this.env);
-			const turn = await assistant.generate({ profile, fieldNames, conversation: [] });
+			const turn = await assistant.generate({ profile, fieldNames, fieldMetadata, conversation: [] });
 			await database.incrementCalls(session.id, userId);
 
 			return json({
@@ -152,6 +153,7 @@ export default class extends WorkerEntrypoint {
 			const turn = await assistant.generate({
 				profile: session.profile,
 				fieldNames: session.field_names,
+				fieldMetadata: session.field_metadata,
 				conversation,
 				finalize
 			});
@@ -180,7 +182,8 @@ export default class extends WorkerEntrypoint {
 				free_completions_used: completion.completed_count,
 				...turn,
 				is_complete: true,
-				next_question: null
+				next_question: null,
+				target_field_name: null
 			});
 		} catch (error) {
 			console.error(`Form assistant ${finalize ? 'finalize' : 'message'} failed`, error);
