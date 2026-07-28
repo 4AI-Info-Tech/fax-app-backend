@@ -71,6 +71,7 @@ Authorization: Bearer <your-jwt-token>
   "message": "Optional cover page message",
   "coverPage": "template_id",
   "senderId": "your_sender_id",
+  "client_reference": "ios:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
   "files": [
     {
       "data": "base64_encoded_file_data",
@@ -80,6 +81,25 @@ Authorization: Bearer <your-jwt-token>
   ]
 }
 ```
+
+#### Idempotent submission
+
+iOS clients send the same UUID in both of these locations:
+
+```http
+Idempotency-Key: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
+```
+
+```json
+{
+  "client_reference": "ios:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+}
+```
+
+The key is scoped to the authenticated user. Repeating the same request with
+the same key returns the original fax submission and does not contact the fax
+provider again. Reusing a key with a different request body returns `409`.
+Requests without an iOS idempotency key retain the legacy behavior.
 
 #### Request Body (Form Data)
 ```

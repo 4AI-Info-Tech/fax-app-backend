@@ -205,12 +205,13 @@ export class TelnyxProvider {
 	 * @param {string|null} userId - User ID from auth context
 	 * @returns {object} Standardized response
 	 */
-	async sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired = 0, billingContext = null) {
+	async sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired = 0, billingContext = null, existingFaxRecord = null) {
 		try {
 			this.logger.log('INFO', 'Starting Telnyx custom workflow: Save to Supabase → Upload to R2 → Send fax');
 
 			// Step 1: Create initial fax record in Supabase
-			const faxRecord = await this.createInitialFaxRecord(faxRequest, userId, creditsRequired, billingContext);
+			const faxRecord = existingFaxRecord
+				|| await this.createInitialFaxRecord(faxRequest, userId, creditsRequired, billingContext);
 			this.logger.log('INFO', 'Step 1 complete: Fax record saved to Supabase', { faxId: faxRecord.id });
 
 			// Step 2: Upload files to R2 and get public URLs
@@ -454,7 +455,13 @@ export class TelnyxProvider {
 			metadata: hasExistingMetadata
 				? {
 					...existingMetadata,
-					telnyx_response: telnyxResponse
+					telnyx_response: telnyxResponse,
+					idempotency: existingMetadata.idempotency
+						? {
+							...existingMetadata.idempotency,
+							state: 'submitted'
+						}
+						: undefined
 				}
 				: telnyxResponse,
 			status: this.mapStatus(telnyxResponse.status),

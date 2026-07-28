@@ -1,4 +1,5 @@
 name = "fax-service"
+account_id = "ccbc9926d08a298aee2a4f0cffcfc4a3"
 main = "src/fax.js"
 compatibility_date = "2025-07-04"
 compatibility_flags = ["nodejs_compat"]

@@ -187,6 +187,16 @@ describe('TelnyxProvider', () => {
 				friendlyId: 'telnyx-fax-123',
 				providerResponse: expect.any(Object)
 			});
+
+			DatabaseUtils.saveFaxRecord.mockClear();
+			await telnyxProvider.sendFaxWithCustomWorkflow(
+				faxRequest,
+				userId,
+				0,
+				null,
+				{ id: 'claimed-fax-123', metadata: { idempotency: { state: 'processing' } } }
+			);
+			expect(DatabaseUtils.saveFaxRecord).not.toHaveBeenCalled();
 		});
 
 		it('should handle workflow failure gracefully', async () => {

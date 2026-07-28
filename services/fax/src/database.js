@@ -94,6 +94,95 @@ export class DatabaseUtils {
 		}
 	}
 
+	/**
+	 * Atomically claim an idempotent fax submission.
+	 *
+	 * The partial unique index on (user_id, client_reference) is the concurrency
+	 * boundary. Exactly one request inserts the placeholder record; concurrent
+	 * requests receive the already-created record without contacting a provider.
+	 */
+	static async claimFaxSubmission(faxData, userId, env, logger) {
+		if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+			throw new Error('Supabase configuration is required for idempotent fax submission');
+		}
+		if (!userId || !faxData?.clientReference) {
+			throw new Error('User ID and client reference are required for idempotent fax submission');
+		}
+
+		const supabase = this.getSupabaseAdminClient(env);
+		const customMetadata = faxData.metadata && typeof faxData.metadata === 'object' && !Array.isArray(faxData.metadata)
+			? faxData.metadata
+			: {};
+		const isFromMobileApp = await FaxDatabaseUtils.isOwnNumber(faxData.senderId, env, logger);
+		const faxRecord = {
+			user_id: userId,
+			status: faxData.status || 'queued',
+			original_status: faxData.originalStatus || faxData.status || 'preparing',
+			recipients: faxData.recipients || [],
+			sender_id: faxData.senderId || null,
+			subject: faxData.subject || null,
+			pages: faxData.pages || 0,
+			document_count: faxData.document_count || 1,
+			cost: faxData.cost !== undefined && faxData.cost !== null ? Math.ceil(faxData.cost) : 0,
+			client_reference: faxData.clientReference,
+			sent_at: faxData.sentAt || new Date().toISOString(),
+			completed_at: null,
+			error_message: null,
+			metadata: customMetadata,
+			provider_fax_id: null,
+			is_from_mobile_app: isFromMobileApp
+		};
+
+		const { data: claimedRecord, error: insertError } = await supabase
+			.from('faxes')
+			.insert(faxRecord)
+			.select()
+			.single();
+
+		if (!insertError) {
+			logger.log('INFO', 'Idempotent fax submission claimed', {
+				recordId: claimedRecord.id,
+				userId,
+				clientReference: faxData.clientReference
+			});
+			return { claimed: true, record: claimedRecord };
+		}
+
+		if (insertError.code !== '23505') {
+			logger.log('ERROR', 'Failed to claim idempotent fax submission', {
+				error: insertError.message,
+				code: insertError.code,
+				userId,
+				clientReference: faxData.clientReference
+			});
+			throw insertError;
+		}
+
+		const { data: existingRecord, error: lookupError } = await supabase
+			.from('faxes')
+			.select('*')
+			.eq('user_id', userId)
+			.eq('client_reference', faxData.clientReference)
+			.single();
+
+		if (lookupError || !existingRecord) {
+			logger.log('ERROR', 'Idempotent fax claim conflicted but existing record could not be loaded', {
+				error: lookupError?.message || 'Record not found',
+				code: lookupError?.code,
+				userId,
+				clientReference: faxData.clientReference
+			});
+			throw lookupError || new Error('Existing idempotent fax submission could not be loaded');
+		}
+
+		logger.log('INFO', 'Idempotent fax submission replay detected', {
+			recordId: existingRecord.id,
+			userId,
+			clientReference: faxData.clientReference
+		});
+		return { claimed: false, record: existingRecord };
+	}
+
 	static async updateFaxRecord(faxId, updateData, env, logger, idType = 'provider_fax_id') {
 		try {
 			if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {

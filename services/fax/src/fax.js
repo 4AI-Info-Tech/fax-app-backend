@@ -780,11 +780,133 @@ export default class extends WorkerEntrypoint {
 		};
 	}
 
+	stableSerialize(value) {
+		if (value === null || typeof value !== 'object') {
+			return JSON.stringify(value);
+		}
+		if (Array.isArray(value)) {
+			return `[${value.map((item) => this.stableSerialize(item)).join(',')}]`;
+		}
+
+		return `{${Object.keys(value)
+			.sort()
+			.filter((key) => value[key] !== undefined)
+			.map((key) => `${JSON.stringify(key)}:${this.stableSerialize(value[key])}`)
+			.join(',')}}`;
+	}
+
+	async hashIdempotentRequest(requestBody) {
+		const serializedBody = this.stableSerialize(requestBody);
+		const digest = await crypto.subtle.digest(
+			'SHA-256',
+			new TextEncoder().encode(serializedBody)
+		);
+		return Array.from(new Uint8Array(digest))
+			.map((byte) => byte.toString(16).padStart(2, '0'))
+			.join('');
+	}
+
+	async resolveFaxIdempotency(request, requestBody) {
+		const headerValue = request.headers.get('Idempotency-Key')?.trim() || null;
+		const bodyReference = requestBody instanceof FormData
+			? requestBody.get('client_reference') || requestBody.get('clientReference')
+			: requestBody?.client_reference || requestBody?.clientReference || null;
+		const trimmedBodyReference = typeof bodyReference === 'string'
+			? bodyReference.trim()
+			: null;
+		const normalizedBodyReference = trimmedBodyReference?.toLowerCase() || null;
+		const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+		const iosReferencePattern = /^ios:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+		if (!headerValue && !normalizedBodyReference?.startsWith('ios:')) {
+			return {
+				enabled: false,
+				clientReference: trimmedBodyReference || null
+			};
+		}
+
+		if (headerValue && !uuidPattern.test(headerValue)) {
+			return {
+				enabled: true,
+				error: {
+					statusCode: 400,
+					error: 'Invalid Idempotency-Key',
+					message: 'Idempotency-Key must be a UUID',
+					timestamp: new Date().toISOString()
+				}
+			};
+		}
+
+		const bodyMatch = normalizedBodyReference?.match(iosReferencePattern);
+		if (normalizedBodyReference && !bodyMatch) {
+			return {
+				enabled: true,
+				error: {
+					statusCode: 409,
+					error: 'Idempotency conflict',
+					message: 'client_reference must match the iOS idempotency key',
+					timestamp: new Date().toISOString()
+				}
+			};
+		}
+
+		const normalizedHeaderKey = headerValue?.toLowerCase() || null;
+		const normalizedBodyKey = bodyMatch?.[1]?.toLowerCase() || null;
+		if (normalizedHeaderKey && normalizedBodyKey && normalizedHeaderKey !== normalizedBodyKey) {
+			return {
+				enabled: true,
+				error: {
+					statusCode: 409,
+					error: 'Idempotency conflict',
+					message: 'Idempotency-Key and client_reference identify different fax submissions',
+					timestamp: new Date().toISOString()
+				}
+			};
+		}
+
+		const key = normalizedHeaderKey || normalizedBodyKey;
+		return {
+			enabled: true,
+			key,
+			clientReference: `ios:${key}`,
+			requestHash: await this.hashIdempotentRequest(requestBody)
+		};
+	}
+
+	buildIdempotentReplayResponse(record, faxRequest, documentCount, totalPages, creditPerPage, creditsRequired, rateInfo, providerName) {
+		return {
+			statusCode: 200,
+			message: 'Fax submission already accepted',
+			data: {
+				id: record.provider_fax_id || record.id,
+				friendlyId: record.metadata?.friendlyId || null,
+				status: record.status || 'queued',
+				originalStatus: record.original_status || 'preparing',
+				message: 'The original fax submission is being reused',
+				timestamp: new Date().toISOString(),
+				recipient: record.recipients?.[0] || faxRequest.recipients?.[0] || 'unknown',
+				pages: record.pages || totalPages,
+				document_count: record.document_count || documentCount,
+				creditPerPage,
+				creditsRequired,
+				creditsUsed: creditsRequired,
+				rateInfo,
+				cost: null,
+				apiProvider: record.metadata?.api_provider || providerName,
+				providerResponse: record.metadata?.provider_response || null,
+				idempotentReplay: true
+			}
+		};
+	}
+
 	async sendFax(request, caller_env, sagContext) {
+		let idempotencyClaim = null;
+		let activeCallerEnv = {};
 		try {
 			// Ensure we have usable objects regardless of whether inputs are strings
 			const callerEnvObj = typeof caller_env === 'string' ? JSON.parse(caller_env || '{}') : (caller_env || {});
 			const sagContextObj = typeof sagContext === 'string' ? JSON.parse(sagContext || '{}') : (sagContext || {});
+			activeCallerEnv = callerEnvObj;
 
 			// Store for access in helper methods
 			this.callerEnvObj = callerEnvObj;
@@ -797,11 +919,19 @@ export default class extends WorkerEntrypoint {
 			});
 
 			const requestBody = await this.parseRequestBody(request);
+			const idempotency = await this.resolveFaxIdempotency(request, requestBody);
+			if (idempotency.error) {
+				return idempotency.error;
+			}
 
 			const apiProviderName = await this.getApiProviderName(request, requestBody, callerEnvObj);
 
 			const faxProvider = await this.createFaxProvider(apiProviderName, callerEnvObj);
 			const faxRequest = await faxProvider.prepareFaxRequest(requestBody);
+			faxRequest.clientReference = idempotency.clientReference
+				|| faxRequest.clientReference
+				|| faxRequest.client_reference
+				|| null;
 
 			const userId = sagContextObj.jwtPayload?.sub || sagContextObj.jwtPayload?.user_id || sagContextObj.user?.id || null;
 			if (!userId) {
@@ -918,12 +1048,78 @@ export default class extends WorkerEntrypoint {
 					isSubscriber: creditSnapshot.isSubscriber,
 					revenueCatSnapshotAttempts: creditCheck.attemptsUsed
 				});
+
+				if (idempotency.enabled) {
+					const billingMetadata = {
+						revenuecat_customer_id: billingContext.revenueCatCustomerId || null,
+						currency_code: billingContext.activeCurrencyCode || null,
+						is_subscriber: billingContext.isSubscriber === true,
+						credits_required: Math.ceil(creditsRequired) || 0
+					};
+					const claimMetadata = {
+						idempotency: {
+							request_hash: idempotency.requestHash,
+							state: 'processing',
+							version: 1
+						},
+						billing: billingMetadata,
+						api_provider: faxProvider.getProviderName()
+					};
+					if (faxRequest.conversionSummary) {
+						claimMetadata.file_conversion = faxRequest.conversionSummary;
+					}
+
+					const claimResult = await DatabaseUtils.claimFaxSubmission({
+						status: 'queued',
+						originalStatus: 'preparing',
+						recipients: faxRequest.recipients || [],
+						senderId: faxRequest.senderId,
+						subject: faxRequest.subject || faxRequest.message || 'Fax Document',
+						pages: totalPages,
+						document_count: documentCount,
+						cost: creditsRequired,
+						clientReference: idempotency.clientReference,
+						sentAt: new Date().toISOString(),
+						metadata: claimMetadata
+					}, userId, callerEnvObj, this.logger);
+
+					if (!claimResult.claimed) {
+						const existingHash = claimResult.record?.metadata?.idempotency?.request_hash;
+						if (!existingHash || existingHash !== idempotency.requestHash) {
+							return {
+								statusCode: 409,
+								error: 'Idempotency conflict',
+								message: 'This Idempotency-Key was already used for a different fax request',
+								timestamp: new Date().toISOString()
+							};
+						}
+
+						return this.buildIdempotentReplayResponse(
+							claimResult.record,
+							faxRequest,
+							documentCount,
+							totalPages,
+							creditPerPage,
+							creditsRequired,
+							rateInfo,
+							faxProvider.getProviderName()
+						);
+					}
+
+					idempotencyClaim = claimResult.record;
+				}
 			
 				let faxResult;
 
 				if (faxProvider.getProviderName() === 'telnyx') {
 					this.logger.log('INFO', 'Using Telnyx custom workflow');
-					faxResult = await faxProvider.sendFaxWithCustomWorkflow(faxRequest, userId, creditsRequired, billingContext);
+					faxResult = await faxProvider.sendFaxWithCustomWorkflow(
+						faxRequest,
+						userId,
+						creditsRequired,
+						billingContext,
+						idempotencyClaim
+					);
 				} else {
 					this.logger.log('INFO', 'Using standard provider workflow');
 					const providerPayload = await faxProvider.buildPayload(faxRequest);
@@ -935,7 +1131,8 @@ export default class extends WorkerEntrypoint {
 						faxProvider.getProviderName(),
 						callerEnvObj,
 						creditsRequired,
-						billingContext
+						billingContext,
+						idempotencyClaim
 					);
 				}
 
@@ -978,11 +1175,30 @@ export default class extends WorkerEntrypoint {
 					rateInfo: rateInfo,
 					cost: null,
 					apiProvider: faxProvider.getProviderName(),
-					providerResponse: faxResult.providerResponse
+					providerResponse: faxResult.providerResponse,
+					idempotentReplay: false
 				}
 			};
 
 		} catch (error) {
+			if (idempotencyClaim?.id) {
+				const existingMetadata = idempotencyClaim.metadata && typeof idempotencyClaim.metadata === 'object'
+					? idempotencyClaim.metadata
+					: {};
+				await DatabaseUtils.updateFaxRecord(idempotencyClaim.id, {
+					status: 'failed',
+					original_status: 'submission_failed',
+					error_message: error.message,
+					metadata: {
+						...existingMetadata,
+						idempotency: {
+							...(existingMetadata.idempotency || {}),
+							state: 'failed'
+						}
+					}
+				}, activeCallerEnv, this.logger, 'id');
+			}
+
 			this.logger.log('ERROR', 'Error in sendFax', {
 				errorMessage: error.message,
 				errorStack: error.stack
@@ -1171,7 +1387,8 @@ export default class extends WorkerEntrypoint {
 		providerName,
 		callerEnvObj,
 		creditsRequired = 0,
-		billingContext = null
+		billingContext = null,
+		existingFaxRecord = null
 	) {
 		try {
 			this.logger.log('DEBUG', 'Saving fax record for standard workflow', {
@@ -1211,8 +1428,40 @@ export default class extends WorkerEntrypoint {
 					} : {}
 				};
 
-			// Use caller environment for database operations (contains Supabase configuration)
-			const savedFaxRecord = await DatabaseUtils.saveFaxRecord(faxDataForSave, userId, callerEnvObj, this.logger);
+			let savedFaxRecord;
+			if (existingFaxRecord?.id) {
+				const existingMetadata = existingFaxRecord.metadata && typeof existingFaxRecord.metadata === 'object'
+					? existingFaxRecord.metadata
+					: {};
+				savedFaxRecord = await DatabaseUtils.updateFaxRecord(existingFaxRecord.id, {
+					status: faxDataForSave.status,
+					original_status: faxDataForSave.originalStatus,
+					recipients: faxDataForSave.recipients,
+					sender_id: faxDataForSave.senderId || null,
+					subject: faxDataForSave.subject || null,
+					pages: faxDataForSave.pages,
+					document_count: faxDataForSave.document_count,
+					cost: faxDataForSave.cost,
+					sent_at: faxDataForSave.sentAt,
+					error_message: null,
+					provider_fax_id: faxResult.id,
+					metadata: {
+						...existingMetadata,
+						...faxDataForSave.metadata,
+						...(faxResult.providerResponse || {}),
+						provider_response: faxResult.providerResponse || null,
+						friendlyId: faxResult.friendlyId || null,
+						api_provider: providerName,
+						idempotency: {
+							...(existingMetadata.idempotency || {}),
+							state: 'submitted'
+						}
+					}
+				}, callerEnvObj, this.logger, 'id');
+			} else {
+				// Legacy clients retain the existing insert-after-provider behavior.
+				savedFaxRecord = await DatabaseUtils.saveFaxRecord(faxDataForSave, userId, callerEnvObj, this.logger);
+			}
 
 			this.logger.log('DEBUG', 'Fax record saved successfully', {
 				faxId: savedFaxRecord?.id,

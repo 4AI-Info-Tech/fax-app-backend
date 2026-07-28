@@ -23,6 +23,15 @@ vi.mock('../src/database.js', () => ({
 			}))
 		})),
 		saveFaxRecord: vi.fn().mockResolvedValue({ id: 'saved-fax-123', notifyre_fax_id: 'fax_mock_123' }),
+		claimFaxSubmission: vi.fn().mockResolvedValue({
+			claimed: true,
+			record: {
+				id: 'claimed-fax-123',
+				status: 'queued',
+				original_status: 'preparing',
+				metadata: {}
+			}
+		}),
 		getFaxRecord: vi.fn().mockResolvedValue({ id: 'updated-fax-123', status: 'queued', user_id: 'test-user-123' }),
 		updateFaxRecord: vi.fn().mockResolvedValue({ id: 'updated-fax-123' }),
 		recordUsage: vi.fn().mockResolvedValue({ success: true }),
@@ -189,6 +198,7 @@ global.fetch = vi.fn();
 
 import FaxService from '../src/fax.js';
 import { DatabaseUtils } from '../src/database.js';
+import { NotifyreProvider } from '../src/providers/notifyre-provider.js';
 import { NotifyreApiUtils } from '../src/utils.js';
 
 describe('Fax Service', () => {
@@ -234,6 +244,17 @@ describe('Fax Service', () => {
 	});
 
 	beforeEach(() => {
+		DatabaseUtils.claimFaxSubmission.mockReset();
+		DatabaseUtils.claimFaxSubmission.mockResolvedValue({
+			claimed: true,
+			record: {
+				id: 'claimed-fax-123',
+				status: 'queued',
+				original_status: 'preparing',
+				metadata: {}
+			}
+		});
+		NotifyreProvider.mockClear();
 		mockConvertToPdf.mockReset();
 		mockConvertToPdf.mockResolvedValue({
 			pdfBytes: new Uint8Array([37, 80, 68, 70]),
@@ -447,6 +468,211 @@ describe('Fax Service', () => {
 				expect(result.message).toBe('Fax submitted successfully');
 				expect(result.data.recipient).toBe('+1234567890');
 				expect(result.data.status).toBe('queued');
+			});
+
+			it('should claim a matching iOS idempotency key before submitting the fax', async () => {
+				const key = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Idempotency-Key': key
+					},
+					body: JSON.stringify({
+						recipient: '+1234567890',
+						message: 'Idempotent fax',
+						client_reference: `ios:${key}`
+					})
+				});
+
+				const result = await faxService.sendFax(request, mockEnv, mockSagContext);
+
+				expect(result.statusCode).toBe(200);
+				expect(result.data.idempotentReplay).toBe(false);
+				expect(DatabaseUtils.claimFaxSubmission).toHaveBeenCalledWith(
+					expect.objectContaining({
+						clientReference: `ios:${key}`,
+						metadata: expect.objectContaining({
+							idempotency: expect.objectContaining({
+								request_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
+								state: 'processing'
+							})
+						})
+					}),
+					'test-user-123',
+					mockEnv,
+					expect.any(Object)
+				);
+				expect(DatabaseUtils.updateFaxRecord).toHaveBeenCalledWith(
+					'claimed-fax-123',
+					expect.objectContaining({
+						provider_fax_id: 'fax_mock_123',
+						metadata: expect.objectContaining({
+							idempotency: expect.objectContaining({ state: 'submitted' })
+						})
+					}),
+					mockEnv,
+					expect.any(Object),
+					'id'
+				);
+				expect(NotifyreProvider.mock.results[0].value.buildPayload).toHaveBeenCalledWith(
+					expect.objectContaining({ clientReference: `ios:${key}` })
+				);
+			});
+
+			it('should replay a sequential duplicate without another provider submission', async () => {
+				const key = '11111111-2222-4333-8444-555555555555';
+				const body = {
+					recipient: '+1234567890',
+					message: 'Retry-safe fax',
+					client_reference: `ios:${key}`
+				};
+				const makeRequest = () => new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Idempotency-Key': key
+					},
+					body: JSON.stringify(body)
+				});
+
+				const firstResult = await faxService.sendFax(makeRequest(), mockEnv, mockSagContext);
+				const requestHash = DatabaseUtils.claimFaxSubmission.mock.calls[0][0].metadata.idempotency.request_hash;
+				DatabaseUtils.claimFaxSubmission.mockResolvedValueOnce({
+					claimed: false,
+					record: {
+						id: 'claimed-fax-123',
+						provider_fax_id: 'fax_mock_123',
+						status: 'queued',
+						original_status: 'Submitted',
+						recipients: ['+1234567890'],
+						pages: 1,
+						document_count: 1,
+						metadata: {
+							friendlyId: 'TEST123',
+							idempotency: { request_hash: requestHash, state: 'submitted' }
+						}
+					}
+				});
+				const secondResult = await faxService.sendFax(makeRequest(), mockEnv, mockSagContext);
+
+				expect(firstResult.statusCode).toBe(200);
+				expect(secondResult.statusCode).toBe(200);
+				expect(secondResult.data.idempotentReplay).toBe(true);
+				expect(secondResult.data.id).toBe('fax_mock_123');
+				const providerSendCalls = NotifyreProvider.mock.results
+					.map((result) => result.value.sendFax.mock.calls.length)
+					.reduce((total, count) => total + count, 0);
+				expect(providerSendCalls).toBe(1);
+			});
+
+			it('should allow only one provider submission for concurrent duplicate requests', async () => {
+				const key = '99999999-8888-4777-8666-555555555555';
+				const body = {
+					recipient: '+1234567890',
+					message: 'Concurrent fax',
+					client_reference: `ios:${key}`
+				};
+				const requestHash = await faxService.hashIdempotentRequest(body);
+				DatabaseUtils.claimFaxSubmission
+					.mockResolvedValueOnce({
+						claimed: true,
+						record: {
+							id: 'concurrent-fax-123',
+							status: 'queued',
+							original_status: 'preparing',
+							metadata: { idempotency: { request_hash: requestHash, state: 'processing' } }
+						}
+					})
+					.mockResolvedValueOnce({
+						claimed: false,
+						record: {
+							id: 'concurrent-fax-123',
+							status: 'queued',
+							original_status: 'preparing',
+							recipients: ['+1234567890'],
+							metadata: { idempotency: { request_hash: requestHash, state: 'processing' } }
+						}
+					});
+				const makeRequest = () => new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Idempotency-Key': key
+					},
+					body: JSON.stringify(body)
+				});
+
+				const results = await Promise.all([
+					faxService.sendFax(makeRequest(), mockEnv, mockSagContext),
+					faxService.sendFax(makeRequest(), mockEnv, mockSagContext)
+				]);
+
+				expect(results.map((result) => result.statusCode)).toEqual([200, 200]);
+				expect(results.filter((result) => result.data.idempotentReplay)).toHaveLength(1);
+				const providerSendCalls = NotifyreProvider.mock.results
+					.map((result) => result.value.sendFax.mock.calls.length)
+					.reduce((total, count) => total + count, 0);
+				expect(providerSendCalls).toBe(1);
+			});
+
+			it('should reject reuse of an idempotency key with a changed payload', async () => {
+				const key = '12345678-1234-4234-8234-123456789abc';
+				const originalBody = {
+					recipient: '+1234567890',
+					message: 'Original fax',
+					client_reference: `ios:${key}`
+				};
+				DatabaseUtils.claimFaxSubmission.mockResolvedValueOnce({
+					claimed: false,
+					record: {
+						id: 'existing-fax-123',
+						status: 'queued',
+						metadata: {
+							idempotency: {
+								request_hash: await faxService.hashIdempotentRequest(originalBody),
+								state: 'submitted'
+							}
+						}
+					}
+				});
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Idempotency-Key': key
+					},
+					body: JSON.stringify({
+						...originalBody,
+						message: 'Changed fax'
+					})
+				});
+
+				const result = await faxService.sendFax(request, mockEnv, mockSagContext);
+
+				expect(result.statusCode).toBe(409);
+				expect(result.error).toBe('Idempotency conflict');
+				expect(NotifyreProvider.mock.results[0].value.sendFax).not.toHaveBeenCalled();
+			});
+
+			it('should reject mismatched header and body idempotency identities before claiming', async () => {
+				const request = new Request('https://api.sendfax.pro/v1/fax/send', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Idempotency-Key': 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+					},
+					body: JSON.stringify({
+						recipient: '+1234567890',
+						client_reference: 'ios:11111111-2222-4333-8444-555555555555'
+					})
+				});
+
+				const result = await faxService.sendFax(request, mockEnv, mockSagContext);
+
+				expect(result.statusCode).toBe(409);
+				expect(DatabaseUtils.claimFaxSubmission).not.toHaveBeenCalled();
+				expect(NotifyreProvider).not.toHaveBeenCalled();
 			});
 
 			it('should return normal insufficient credits for free users without retrying RevenueCat', async () => {
