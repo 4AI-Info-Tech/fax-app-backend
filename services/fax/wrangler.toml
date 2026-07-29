@@ -45,6 +45,7 @@ preview_bucket_name = "fax-files-staging-preview"
 [env.prod]
 name = "fax-service-prod" 
 minify = true
+preview_urls = false
 
 [env.prod.observability]
 enabled = true
@@ -64,8 +65,8 @@ TELNYX_MAX_CONVERSION_FILES = "10"
 [[env.prod.services]]
 binding = "CONVERTER_SERVICE"
 service = "converter-service"
+environment = "production"
 
 [[env.prod.r2_buckets]]
 binding = "FAX_FILES_BUCKET"
 bucket_name = "fax-files-prod"
-preview_bucket_name = "fax-files-prod-preview"
