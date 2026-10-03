@@ -217,7 +217,7 @@ export class DatabaseUtils {
 
 	/**
 	 * Transfer user data from one user to another for RevenueCat TRANSFER events.
-	 * Subscription and credit state are managed by RevenueCat directly.
+	 * Subscriptions are moved by RevenueCat; credit balances are moved in credit-transfer.js.
 	 */
 	static async transferUserData(fromUserId, toUserId, env, logger, transferReason = 'revenuecat_transfer') {
 		try {
@@ -331,6 +331,35 @@ export class DatabaseUtils {
 				toUserId
 			};
 		}
+	}
+
+	/**
+	 * Whether a TRANSFER source is an anonymous account whose credits should follow the user.
+	 * Covers RevenueCat anonymous IDs and anonymous Supabase users.
+	 */
+	static async isAnonymousTransferSource(userId, env, logger) {
+		if (typeof userId === 'string' && userId.startsWith('$RCAnonymousID:')) {
+			return true;
+		}
+
+		const normalizedUserId = DatabaseUtils.normalizeUUID(userId);
+		if (!normalizedUserId) {
+			return false;
+		}
+
+		const supabase = DatabaseUtils.getSupabaseAdminClient(env);
+		const { data, error } = await supabase.auth.admin.getUserById(normalizedUserId);
+		if (!error && data?.user) {
+			return data.user.app_metadata?.is_anonymous === true || data.user.is_anonymous === true;
+		}
+		if (error && error.status !== 404) {
+			throw new Error(`Failed to look up transfer source ${normalizedUserId}: ${error.message}`);
+		}
+
+		// Credits move before the anonymous user is deleted, so a missing source was already
+		// handled by an earlier delivery of this event and has nothing left to move.
+		logger.log('INFO', 'Transfer source user not found; skipping credit transfer', { userId: normalizedUserId });
+		return false;
 	}
 
 	static async moveRowsByUserId(supabase, tableName, fromUserId, toUserId, logger) {

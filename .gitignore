@@ -198,3 +198,6 @@ dev/
 
 tokens.json
 tokens.env
+
+# RevenueCat credit backfill output (contains user IDs)
+services/revenuecat/backfill-logs/

@@ -5,6 +5,8 @@
 import { env, WorkerEntrypoint } from "cloudflare:workers";
 import { Logger } from './utils.js';
 import { DatabaseUtils } from './database.js';
+import { RevenueCatClient } from '../../shared/revenuecat-client.js';
+import { transferVirtualCurrencyBalances } from './credit-transfer.js';
 
 export default class extends WorkerEntrypoint {
 	constructor(ctx, env) {
@@ -301,6 +303,10 @@ export default class extends WorkerEntrypoint {
 			toUserId,
 			eventId: event.id
 		});
+
+		// RevenueCat moves the subscription but not its credits. Errors propagate so the
+		// webhook returns 500 and RevenueCat retries the event.
+		await this.transferCredits(transferredFrom, toUserId, callerEnvObj, event.id);
 		
 		// Perform the transfer using the database utility
 		const transferResult = await DatabaseUtils.transferUserData(fromUserId, toUserId, callerEnvObj, this.logger, 'revenuecat_transfer');
@@ -325,33 +331,52 @@ export default class extends WorkerEntrypoint {
 		}
 	}
 
+	/**
+	 * Move virtual currency balances from anonymous transferred_from customers to the target.
+	 */
+	async transferCredits(fromUserIds, toUserId, callerEnvObj, eventId) {
+		const rcClient = new RevenueCatClient(callerEnvObj, this.logger);
+		if (!rcClient.isConfigured()) {
+			this.logger.log('ERROR', 'RevenueCat is not configured, cannot move credits for transfer', {
+				eventId,
+				toUserId,
+				error: rcClient.getConfigurationError()
+			});
+			return;
+		}
+
+		const result = await transferVirtualCurrencyBalances({
+			rcClient,
+			fromUserIds,
+			toUserId,
+			logger: this.logger,
+			isAnonymousSource: (userId) => DatabaseUtils.isAnonymousTransferSource(userId, callerEnvObj, this.logger)
+		});
+
+		this.logger.log('INFO', 'Virtual currency transfer processed', {
+			eventId,
+			toUserId,
+			sourcesMoved: result.sourcesMoved,
+			movedBalances: result.movedBalances,
+			skippedSources: result.skippedSources
+		});
+	}
+
 
 
 	/**
 	 * Health check endpoint
 	 */
 	async health(request, caller_env, sagContext) {
-		try {
-			this.logger.log('INFO', 'Health check requested');
-
-			return new Response(JSON.stringify({
-				status: 'healthy',
-				service: 'revenuecat',
-				callerEnv: JSON.stringify(caller_env),
-				sagContext: JSON.stringify(sagContext),
-				env: JSON.stringify(this.env),
-				timestamp: new Date().toISOString()
-			}), {
-				status: 200,
-				headers: { 'Content-Type': 'application/json' }
-			});
-		} catch (error) {
-			this.logger.log('ERROR', 'Error in health check', error);
-			return new Response(JSON.stringify({ error: 'Internal server error' }), {
-				status: 500,
-				error: error.message,
-				headers: { 'Content-Type': 'application/json' }
-			});
-		}
+		this.logger.log('INFO', 'Health check requested');
+		// Never echo env or context: the route is public and env holds the gateway's secrets.
+		return new Response(JSON.stringify({
+			status: 'healthy',
+			service: 'revenuecat',
+			timestamp: new Date().toISOString()
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		});
 	}
 } 
