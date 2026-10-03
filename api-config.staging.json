@@ -24,10 +24,6 @@
             "binding": "CONVERTER_SERVICE"
         },
         {
-            "alias": "env_test_service",
-            "binding": "ENV_TEST_SERVICE"
-        },
-        {
             "alias": "revenuecat_service",
             "binding": "REVENUECAT_SERVICE"
         },
@@ -135,26 +131,6 @@
                 "type": "service_binding",
                 "binding": "fax_service",
                 "function": "testNotification"
-            },
-            "auth": false
-        },
-        {
-            "method": "GET",
-            "path": "/v1/env-test/debug",
-            "integration": {
-                "type": "service_binding",
-                "binding": "env_test_service",
-                "function": "debug"
-            },
-            "auth": false
-        },
-        {
-            "method": "GET",
-            "path": "/v1/fax/debug",
-            "integration": {
-                "type": "service_binding",
-                "binding": "fax_service",
-                "function": "debug"
             },
             "auth": false
         },

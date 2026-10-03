@@ -1215,19 +1215,11 @@ export default class extends WorkerEntrypoint {
 	}
 
 	async debug(request, caller_env = "{}", sagContext = "{}") {
-		console.log("[FAX-SERVICE][DEBUG] Caller Environment:", caller_env);
-		console.log("[FAX-SERVICE][DEBUG] SAG Context:", sagContext);
-		console.log("[FAX-SERVICE][DEBUG] Service Environment:", this.env);
-
+		// Env and context are not echoed or logged: they carry the gateway's secrets.
 		return {
 			statusCode: 200,
-			message: "Debug information logged successfully",
-			data: {
-				callerEnv: JSON.stringify(caller_env),
-				sagContext: JSON.stringify(sagContext),
-				env: JSON.stringify(this.env),
-				timestamp: new Date().toISOString()
-			}
+			message: "Debug endpoint is disabled",
+			data: { timestamp: new Date().toISOString() }
 		};
 	}
 

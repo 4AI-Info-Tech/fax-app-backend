@@ -172,3 +172,13 @@ test('api-config.staging.json and api-config.prod.json: service bindings exist i
     );
   }
 });
+
+for (const configFile of configFiles) {
+  test(`${configFile}: no route exposes debug handlers`, () => {
+    const config = readJson(configFile);
+    const debugRoutes = config.paths
+      .filter((route) => route.integration?.function === 'debug' || /\/debug(\/|$)/.test(route.path))
+      .map((route) => `${route.method} ${route.path}`);
+    assert.deepEqual(debugRoutes, [], `${configFile} exposes debug routes; they echo gateway secrets`);
+  });
+}

@@ -141,44 +141,15 @@ export default class extends WorkerEntrypoint {
 	}
 
 	async debug(request, caller_env = "{}", sagContext = "{}") {
-		this.logger.log('INFO', 'Debug endpoint requested');
-
-		try {
-			const callerEnvObj = JSON.parse(caller_env || '{}');
-			const sagContextObj = JSON.parse(sagContext || '{}');
-
-			return new Response(JSON.stringify({
-				service: 'management',
-				callerEnvironment: callerEnvObj,
-				sagContext: sagContextObj,
-				serviceEnvironment: {
-					LOG_LEVEL: this.env.LOG_LEVEL
-				},
-				timestamp: new Date().toISOString()
-			}), {
-				status: 200,
-				headers: {
-					'Content-Type': 'application/json',
-					'Access-Control-Allow-Origin': '*',
-					'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-					'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-				}
-			});
-		} catch (error) {
-			this.logger.log('ERROR', `Debug endpoint failed: ${error.message}`);
-			return new Response(JSON.stringify({
-				error: error.message,
-				service: 'management'
-			}), {
-				status: 500,
-				headers: {
-					'Content-Type': 'application/json',
-					'Access-Control-Allow-Origin': '*',
-					'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-					'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-				}
-			});
-		}
+		// Env and context are not echoed: they carry the gateway's secrets.
+		return new Response(JSON.stringify({
+			service: 'management',
+			serviceEnvironment: { LOG_LEVEL: this.env.LOG_LEVEL },
+			timestamp: new Date().toISOString()
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		});
 	}
 
 	async appStoreWebhook(request, caller_env = "{}", sagContext = "{}") {

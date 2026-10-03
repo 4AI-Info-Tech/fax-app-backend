@@ -368,27 +368,15 @@ export default class extends WorkerEntrypoint {
 	 * Health check endpoint
 	 */
 	async health(request, caller_env, sagContext) {
-		try {
-			this.logger.log('INFO', 'Health check requested');
-
-			return new Response(JSON.stringify({
-				status: 'healthy',
-				service: 'revenuecat',
-				callerEnv: JSON.stringify(caller_env),
-				sagContext: JSON.stringify(sagContext),
-				env: JSON.stringify(this.env),
-				timestamp: new Date().toISOString()
-			}), {
-				status: 200,
-				headers: { 'Content-Type': 'application/json' }
-			});
-		} catch (error) {
-			this.logger.log('ERROR', 'Error in health check', error);
-			return new Response(JSON.stringify({ error: 'Internal server error' }), {
-				status: 500,
-				error: error.message,
-				headers: { 'Content-Type': 'application/json' }
-			});
-		}
+		this.logger.log('INFO', 'Health check requested');
+		// Never echo env or context: the route is public and env holds the gateway's secrets.
+		return new Response(JSON.stringify({
+			status: 'healthy',
+			service: 'revenuecat',
+			timestamp: new Date().toISOString()
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' }
+		});
 	}
 } 
